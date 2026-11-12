@@ -1,0 +1,10 @@
+# Settings derived from MODSEC_* environment variables that must come after the CRS rules are defined.
+# Rendered at container start into /etc/nginx/modsec/rendered/ and loaded after the CRS rules.
+
+# Status returned for a blocked request. The CRS blocking rules use a plain "deny" (403 by default),
+# and SecDefaultAction cannot be repeated once crs-setup.conf has set it, so update the rules themselves (949110/949111 inbound, 959100/959101 outbound anomaly thresholds).
+# "deny" is repeated because an update with only "status" drops it.
+SecRuleUpdateActionById 949110 "deny,status:${MODSEC_DENY_STATUS}"
+SecRuleUpdateActionById 949111 "deny,status:${MODSEC_DENY_STATUS}"
+SecRuleUpdateActionById 959100 "deny,status:${MODSEC_DENY_STATUS}"
+SecRuleUpdateActionById 959101 "deny,status:${MODSEC_DENY_STATUS}"

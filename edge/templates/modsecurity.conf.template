@@ -1,0 +1,29 @@
+# Settings derived from MODSEC_* environment variables. Rendered at container start by the official
+# nginx entrypoint (envsubst) into /etc/nginx/modsec/rendered/ and loaded after the CRS's crs-setup.conf.
+# Fixed settings are in modsecurity/modsecurity.conf; no directive appears in both.
+
+SecRuleEngine ${MODSEC_RULE_ENGINE}
+SecRequestBodyLimit ${MODSEC_REQ_BODY_LIMIT}
+
+# Audit log. MODSEC_AUDIT_ENGINE is derived from MODSEC_AUDIT_LOG by docker-entrypoint.d/18-modsec-audit.envsh.
+SecAuditEngine ${MODSEC_AUDIT_ENGINE}
+SecAuditLog ${MODSEC_AUDIT_LOG}
+SecAuditLogFormat ${MODSEC_AUDIT_FORMAT}
+
+# CRS settings: blocking paranoia level and anomaly score thresholds.
+SecAction \
+    "id:900000,\
+    phase:1,\
+    pass,\
+    t:none,\
+    nolog,\
+    setvar:tx.blocking_paranoia_level=${MODSEC_PARANOIA}"
+
+SecAction \
+    "id:900110,\
+    phase:1,\
+    pass,\
+    t:none,\
+    nolog,\
+    setvar:tx.inbound_anomaly_score_threshold=${MODSEC_ANOMALY_INBOUND},\
+    setvar:tx.outbound_anomaly_score_threshold=${MODSEC_ANOMALY_OUTBOUND}"
