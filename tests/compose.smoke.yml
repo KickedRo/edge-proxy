@@ -1,7 +1,7 @@
 # Compose file for tests/split_smoke.sh: nginx-proxy's "separate containers" layout with the edge and gen images.
 # Not meant to be run by hand: the script sets the variables below, a unique project name per run, and cleans up.
 #   EDGE_IMAGE, GEN_IMAGE, RUN (unique suffix for container names and the nginx container label),
-#   BACKEND_IMAGE, HTTP_PORT / HTTPS_PORT (host ports on 127.0.0.1; empty = Docker picks one).
+#   BACKEND_IMAGE, HEADERS_BACKEND_IMAGE, HTTP_PORT / HTTPS_PORT (host ports on 127.0.0.1; empty = Docker picks one).
 volumes:
   nginx_conf:
   nginx_vhost:
@@ -49,8 +49,9 @@ services:
       NGINX_CONTAINER_LABEL: "${RUN:?}.nginx"
       DHPARAM_SKIP: "false"
       TRUST_DOWNSTREAM_PROXY: "false" # no trusted proxy in front in this test; also silences the entrypoint's warning
-      # Real deployments: with network_mode none the entrypoint reads gen's own (empty) resolv.conf, so set RESOLVERS
-      # explicitly to the resolver nginx should use.
+      # Real deployments: the entrypoint writes the resolvers of gen's own resolv.conf into nginx's "resolver". Under
+      # network_mode none that file holds the host's resolvers, not Docker's 127.0.0.11, so set RESOLVERS explicitly
+      # to the resolver nginx should use.
     # No command: the image's default command runs, only the label above is set.
     volumes:
       # Rootful Docker's socket path; rootless Docker and Docker Desktop use another one.
@@ -69,7 +70,20 @@ services:
     environment:
       VIRTUAL_HOST: app.example.com
 
-  # Second backend, started by the test only (profile), to carry the deliberately broken vhost snippet.
+  # Backend that sends headers of its own (version headers the edge hides, see tests/fixtures/headers-backend.conf).
+  headers:
+    image: ${HEADERS_BACKEND_IMAGE:?}
+    container_name: ${RUN:?}-headers
+    networks: [proxy]
+    environment:
+      VIRTUAL_HOST: headers.example.com
+      NGINX_ENTRYPOINT_QUIET_LOGS: "1"
+    volumes:
+      - ./fixtures/headers-backend.conf:/etc/nginx/conf.d/backend.conf:ro
+
+  # Second backend, to carry the deliberately broken vhost snippet. The script activates every profile
+  # (--profile '*'), so "up --no-start" creates it with the others and "down" removes it; the test starts it only when
+  # it needs it.
   broken:
     image: ${BACKEND_IMAGE:?}
     container_name: ${RUN:?}-broken

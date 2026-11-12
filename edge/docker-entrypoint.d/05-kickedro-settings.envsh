@@ -1,0 +1,124 @@
+# shellcheck shell=sh
+# Settings check, sourced (not executed) by the official /docker-entrypoint.sh before its other scripts, so the
+# defaults exported here reach them (18-kickedro-render.sh, 19-kickedro-block-page.sh). For every setting in
+# /usr/local/share/kickedro/settings.tsv (edge/settings.tsv in the repository, the single source of the defaults):
+#  - an unset or empty variable gets its default;
+#  - a value that is not allowed stops the container, with a message naming the variable and the allowed values
+#    (every invalid setting is reported first);
+#  - a value weaker than the default prints one "SECURITY:" line: what protection is lost, and where it is documented.
+# The work runs in a subshell, so only the exported defaults reach the entrypoint's shell. The settings hold no
+# secrets.
+
+kickedro_settings() (
+    set -eu
+    tsv=/usr/local/share/kickedro/settings.tsv
+    docs=https://github.com/KickedRo/edge-proxy/blob/main/docs/settings.md
+    tab=$(printf '\t')
+
+    is_int() { # value max-digits -> true for a whole number from 1 with at most max-digits digits
+        case $1 in ''|0*|*[!0-9]*) return 1;; esac
+        [ "${#1}" -le "$2" ]
+    }
+    ms() { # <time> or 0 -> milliseconds
+        case $1 in
+            0) echo 0; return 0;;
+            *ms) n=${1%ms} f=1;;
+            *s) n=${1%s} f=1000;;
+            *m) n=${1%m} f=60000;;
+            *h) n=${1%h} f=3600000;;
+            *) return 1;;
+        esac
+        is_int "$n" 9 || return 1
+        echo $((n * f))
+    }
+    bytes() { # size in bytes, or with k or m -> bytes
+        case $1 in
+            *[kK]) n=${1%?} f=1024;;
+            *[mM]) n=${1%?} f=1048576;;
+            *) n=$1 f=1;;
+        esac
+        is_int "$n" 7 || return 1
+        echo $((n * f))
+    }
+    matches() { # value alternative -> true when value is that literal value or has that <form>
+        case $2 in
+            '<integer>') is_int "$1" 15;;
+            '<time>') [ "$1" != 0 ] && ms "$1" >/dev/null;;
+            '<buffers>')
+                case $1 in
+                    *' '*' '*) return 1;;
+                    *' '*) is_int "${1%% *}" 4 && bytes "${1#* }" >/dev/null;;
+                    *) return 1;;
+                esac;;
+            '<path>')
+                case $1 in
+                    /|*[!A-Za-z0-9._/-]*) return 1;;
+                    /*) return 0;;
+                    *) return 1;;
+                esac;;
+            *) [ "$1" = "$2" ];;
+        esac
+    }
+    one_of() { # value alternatives -> true when value matches one of the |-separated alternatives
+        rest=$2
+        while :; do
+            alt=${rest%%|*}
+            if matches "$1" "$alt"; then return 0; fi
+            [ "$alt" != "$rest" ] || return 1
+            rest=${rest#*|}
+        done
+    }
+    above() { # value threshold -> true when value is above the threshold (same form: number, time or buffers)
+        case $2 in
+            *' '*) [ "${1%% *}" -gt "${2%% *}" ] || [ "$(bytes "${1#* }")" -gt "$(bytes "${2#* }")" ];;
+            *[0-9]) [ "$1" -gt "$2" ];;
+            *) [ "$(ms "$1")" -gt "$(ms "$2")" ];;
+        esac
+    }
+    weaker() { # value WEAKER_IF -> true when value is weaker than the default
+        case $2 in
+            -) return 1;;
+            '>'*) above "$1" "${2#>}";;
+            *) one_of "$1" "$2";;
+        esac
+    }
+    explain() { # ALLOWED -> the forms it uses, explained
+        case $1 in *'<integer>'*) printf ' <integer> is a whole number from 1.';; esac
+        case $1 in *'<time>'*) printf ' <time> is a whole number with the unit ms, s, m or h, e.g. 10s.';; esac
+        case $1 in *'<buffers>'*) printf ' <buffers> is a count and a size, e.g. 4 8k.';; esac
+        case $1 in *'<path>'*) printf ' <path> is an absolute file path (letters, digits and . _ / - only).';; esac
+    }
+
+    invalid=0
+    while IFS=$tab read -r var default allowed weak risk what when; do
+        case $var in ''|'#'*) continue;; esac
+        case $var in
+            [A-Z]*[!A-Z0-9_]*|[!A-Z]*) echo "ERROR: $tsv: bad variable name '$var'" >&2; exit 1;;
+        esac
+        if [ -z "$when" ] || [ -z "$what" ] || [ -z "$risk" ]; then
+            echo "ERROR: $tsv: the line for $var does not have seven fields" >&2; exit 1
+        fi
+        case $default in *"'"*) echo "ERROR: $tsv: the default of $var contains a quote" >&2; exit 1;; esac
+
+        eval "value=\${$var:-}"
+        if [ -z "$value" ]; then
+            value=$default
+            printf "export %s='%s'\n" "$var" "$value"
+        fi
+        anchor=$(printf '%s' "$var" | tr '[:upper:]' '[:lower:]')
+        if ! one_of "$value" "$allowed"; then
+            printf "ERROR: %s='%s' is not allowed. Allowed: %s.%s See %s#%s\n" \
+                "$var" "$value" "$allowed" "$(explain "$allowed")" "$docs" "$anchor" >&2
+            invalid=1
+        elif weaker "$value" "$weak"; then
+            printf 'SECURITY: %s=%s (default %s): %s See %s#%s\n' "$var" "$value" "$default" "$risk" "$docs" "$anchor" >&2
+        fi
+    done < "$tsv"
+    [ "$invalid" = 0 ] || echo "ERROR: invalid settings, not starting." >&2
+    exit "$invalid"
+)
+
+kickedro_settings_exports=$(kickedro_settings) || exit 1
+eval "$kickedro_settings_exports"
+unset kickedro_settings_exports
+unset -f kickedro_settings

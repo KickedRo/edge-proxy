@@ -126,19 +126,27 @@ RUN echo "\ninclude /etc/nginx/toplevel.conf.d/*.conf;" >> /etc/nginx/nginx.conf
 ADD https://raw.githubusercontent.com/nginx-proxy/nginx-proxy/${NGINX_PROXY_REF}/network_internal.conf /etc/nginx/network_internal.conf
 
 # ModSecurity: load the module (main context) and switch it on at http level from an image-owned
-# include (not conf.d, which is a shared volume in the split layout).
+# include (not conf.d, which is a shared volume in the split layout). The http-level hardening (rendered at start
+# from templates/hardening.conf.template) is included the same way; its keepalive_timeout replaces the stock one.
 COPY nginx/modsecurity-http.conf /etc/nginx/modsecurity-http.conf
 RUN set -eux; \
     sed -i '1i load_module modules/ngx_http_modsecurity_module.so;' /etc/nginx/nginx.conf; \
-    sed -i 's|^\( *\)include /etc/nginx/conf.d/\*.conf;|\1include /etc/nginx/modsecurity-http.conf;\n&|' /etc/nginx/nginx.conf; \
+    sed -i 's|^\( *\)include /etc/nginx/conf.d/\*.conf;|\1include /etc/nginx/modsecurity-http.conf;\n\1include /etc/nginx/modsec/rendered/hardening.conf;\n&|' /etc/nginx/nginx.conf; \
+    sed -i '/^ *keepalive_timeout /d' /etc/nginx/nginx.conf; \
     grep -q '^ *include /etc/nginx/modsecurity-http.conf;' /etc/nginx/nginx.conf; \
+    grep -q '^ *include /etc/nginx/modsec/rendered/hardening.conf;' /etc/nginx/nginx.conf; \
     grep -q '^load_module modules/ngx_http_modsecurity_module.so;' /etc/nginx/nginx.conf; \
+    ! grep -q 'keepalive_timeout' /etc/nginx/nginx.conf; \
     chmod 644 /etc/nginx/network_internal.conf
 
 COPY modsecurity/ /etc/nginx/modsec/
 # The image's own templates live outside /etc/nginx/templates, which stays free for users' templates
-# (official NGINX_ENVSUBST_* mechanism, untouched). 18-modsec-render.sh renders these ones.
+# (official NGINX_ENVSUBST_* mechanism, untouched). 18-kickedro-render.sh renders these ones.
 COPY templates/ /etc/nginx/modsec/templates/
+# The settings (defaults, allowed values, SECURITY: texts; read at start by 05-kickedro-settings.envsh and
+# 18-kickedro-render.sh) and the built-in block page (19-kickedro-block-page.sh). Not under /etc/nginx/kickedro,
+# where a custom block page is mounted.
+COPY --chmod=644 settings.tsv block-page.html /usr/local/share/kickedro/
 COPY --chmod=755 docker-entrypoint.d/ /docker-entrypoint.d/
 
 # Working directories: ModSecurity temp/data, rendered settings, and the two mount points for site rules.
@@ -149,14 +157,7 @@ RUN set -eux; \
         /etc/nginx/modsec/rendered /etc/nginx/modsec/custom.d /etc/nginx/modsec/after.d; \
     chown -R nginx:nginx /var/cache/modsecurity
 
-# Defaults for the settings (read by 18-modsec-render.sh). The audit log goes to stdout so it is in
-# `docker logs`. Docker's default json-file driver does not rotate unless max-size is configured (or another
-# logging driver is used); a file path is one variable away.
-ENV MODSEC_RULE_ENGINE=On \
-    MODSEC_PARANOIA=1 \
-    MODSEC_ANOMALY_INBOUND=5 \
-    MODSEC_ANOMALY_OUTBOUND=4 \
-    MODSEC_REQ_BODY_LIMIT=134217728 \
-    MODSEC_AUDIT_LOG=/dev/stdout \
-    MODSEC_AUDIT_FORMAT=JSON \
-    MODSEC_DENY_STATUS=403
+# No ENV defaults for the settings: edge/settings.tsv is their single source. 05-kickedro-settings.envsh applies the
+# default of every setting that is unset or empty at start (and validates every value). The audit log goes to
+# stdout by default, so it is in `docker logs`; Docker's default json-file driver does not rotate unless max-size
+# is configured (or another logging driver is used), and a file path is one variable away.
