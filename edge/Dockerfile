@@ -107,7 +107,11 @@ ARG NGINX_PROXY_REF
 # Runtime libraries only (no compilers or build tools). libstdc++6, libpcre2-8-0 and zlib come with
 # the official image already or as dependencies. The upgrade picks up Debian security fixes that are newer
 # than the base image (CI fails on fixable HIGH/CRITICAL findings, so a rebuild is the fix).
+# SECURITY_EPOCH (the UTC date, from CI) is only declared so this layer is rebuilt daily instead of being served
+# from the build cache forever.
+ARG SECURITY_EPOCH
 RUN set -eux; \
+    export DEBIAN_FRONTEND=noninteractive; \
     apt-get update; \
     apt-get -y upgrade; \
     apt-get install -y --no-install-recommends libxml2 libyajl2 libstdc++6; \

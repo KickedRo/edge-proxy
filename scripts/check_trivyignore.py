@@ -3,13 +3,15 @@
 
 Usage: check_trivyignore.py FILE [--today YYYY-MM-DD]
 Exit 0 if all entries are fine, 1 if any entry has no `statement`, no `expired_at`, an `expired_at` in the
-past, or an `expired_at` more than 30 days after today. Exit 2 if the file cannot be parsed.
+past or today (Trivy stops applying an entry at 00:00 UTC on that date), or an `expired_at` more than 30 days after today.
+Exit 2 if the file cannot be parsed.
 
 Parsing choice: stdlib only, so a minimal reader for the Trivy ignore format (not the JSON-compatible subset).
 It understands exactly what the format needs: the top-level keys (vulnerabilities, misconfigurations, secrets,
-licenses), each either `[]` or a list of entries `- key: value` with scalar values (plain or quoted) and
-`paths`/`purls` lists, plus comments. Anything else (anchors, flow mappings, multi-line scalars) is rejected
-rather than guessed at.
+licenses), each either `[]` or a list of entries `- key: value` with scalar values (plain or quoted, optionally
+followed by a comment) and `paths`/`purls` lists (dashes indented or not), plus comments. An empty value, `~`,
+`null` or a comment-only value counts as missing. Anything else (anchors, flow mappings, multi-line scalars) is
+rejected rather than guessed at.
 """
 import argparse
 import datetime
@@ -24,13 +26,19 @@ class ParseError(Exception):
     pass
 
 
+NULLS = ("~", "null", "Null", "NULL")
+
+
 def scalar(text):
+    """A plain or quoted scalar; YAML null, an empty value or a comment-only value gives ''."""
     text = text.strip()
-    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
-        return text[1:-1]
+    m = re.fullmatch(r"(['\"])(.*)\1\s*(?:#.*)?", text)
+    if m:
+        return m.group(2)
     if text[:1] in "|>&*{[!":
         raise ParseError("unsupported YAML value: " + text)
-    return re.sub(r"\s+#.*$", "", text)
+    text = re.sub(r"(^|\s+)#.*$", "", text).strip()
+    return "" if text in NULLS else text
 
 
 def parse(text):
@@ -43,7 +51,7 @@ def parse(text):
         indent = len(line) - len(line.lstrip())
         body = line.strip()
         where = "line %d: " % n
-        if indent == 0:
+        if indent == 0 and not (section and body.startswith("- ")):
             m = re.fullmatch(r"(\w+):\s*(\[\])?\s*(#.*)?", body)
             if not m or m.group(1) not in SECTIONS:
                 raise ParseError(where + "expected one of %s at top level" % ", ".join(SECTIONS))
@@ -51,7 +59,8 @@ def parse(text):
             data[section] = []
         elif section is None:
             raise ParseError(where + "content before a section")
-        elif body.startswith("- ") and listkey and indent > item_indent:
+        elif body.startswith("- ") and listkey and indent >= item_indent + 2:
+            # a list item of the entry's current list (also when the dash is not indented under its key)
             entry[listkey].append(scalar(body[2:]))
         elif body.startswith("- "):
             entry, item_indent = {}, indent
@@ -96,8 +105,8 @@ def problems(data, today):
             except ValueError:
                 out.append("%s: expired_at is not YYYY-MM-DD: %s" % (name, raw))
                 continue
-            if exp < today:
-                out.append("%s: expired on %s" % (name, raw))
+            if exp <= today:
+                out.append("%s: expired on %s (an entry stops applying at 00:00 UTC on its expired_at date)" % (name, raw))
             elif exp > today + datetime.timedelta(days=MAX_DAYS):
                 out.append("%s: expired_at %s is more than %d days ahead of %s" % (name, raw, MAX_DAYS, today))
     return out

@@ -7,6 +7,11 @@ on:
   schedule:
     - cron: "17 3 * * *"
   workflow_dispatch:
+    inputs:
+      security_epoch:
+        description: "Override SECURITY_EPOCH (default: today's UTC date, YYYYMMDD). A new value re-runs the image security-upgrade layers."
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -27,6 +32,8 @@ jobs:
   resolve:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    outputs:
+      epoch: ${{ steps.epoch.outputs.epoch }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -35,6 +42,17 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python3 scripts/resolve_versions.py --out versions.env && cat versions.env
+      # SECURITY_EPOCH: build argument consumed only by the security-upgrade layers of the images (apt upgrade,
+      # docker-gen's vulnerability-driven module upgrades), so they re-run once a day while the expensive layers
+      # (the ModSecurity compile) stay cached. Computed once here so both builds of a run agree.
+      - name: Security epoch
+        id: epoch
+        env:
+          OVERRIDE: ${{ inputs.security_epoch }}
+        run: |
+          epoch="${OVERRIDE:-$(date -u +%Y%m%d)}"
+          case "$epoch" in *[!A-Za-z0-9._-]* | "") echo "bad security epoch" >&2; exit 1 ;; esac
+          echo "epoch=$epoch" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: versions
@@ -54,13 +72,17 @@ jobs:
           name: versions
       - name: Build arguments from the resolved versions
         id: args
+        env:
+          EPOCH: ${{ needs.resolve.outputs.epoch }}
         run: |
           {
             echo 'edge<<EOF'
-            grep -v -E '^(DOCKER_GEN|GO_)' versions.env
+            grep -E '^(NGINX_VERSION|MODSECURITY_VERSION|MODSECURITY_NGINX_VERSION|CRS_VERSION|NGINX_PROXY_REF)=' versions.env
+            echo "SECURITY_EPOCH=$EPOCH"
             echo 'EOF'
             echo 'gen<<EOF'
             grep -E '^(GO_VERSION|DOCKER_GEN_VERSION|NGINX_PROXY_REF)=' versions.env
+            echo "SECURITY_EPOCH=$EPOCH"
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
 
@@ -104,10 +126,12 @@ jobs:
           docker save edge-proxy:ci -o "$RUNNER_TEMP/scan/edge.tar"
           docker save edge-proxy-gen:ci -o "$RUNNER_TEMP/scan/gen.tar"
           docker pull -q "$TRIVY_IMAGE" >/dev/null
+          docker volume create trivy-cache >/dev/null   # one vulnerability DB download for both scans
           status=0
           for image in edge gen; do
             echo "::group::trivy $image"
             docker run --rm -e TRIVY_DB_REPOSITORY -e TRIVY_NO_PROGRESS=true \
+              -e TRIVY_CACHE_DIR=/cache -v trivy-cache:/cache \
               -v "$RUNNER_TEMP/scan:/scan:ro" -v "$PWD/.trivyignore.yaml:/.trivyignore.yaml:ro" \
               "$TRIVY_IMAGE" image --input "/scan/$image.tar" \
               --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 \
