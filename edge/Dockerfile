@@ -15,8 +15,9 @@ ARG CRS_VERSION
 
 # Pinned signing keys (full fingerprints). The key files in keys/ are only a convenience: the build
 # fails unless the signature was made by a key with exactly these fingerprints.
-# nginx: the five release signers listed on https://nginx.org/en/pgp_keys.html
-ARG NGINX_SIGNER_FPRS="43387825DDB1BB97EC36BA5D007C8D7C15D87369 D6786CE303D9A9022998DC6CC8464D549AF75C0A 7338973069ED3F443F4D37DFA64FD5B17ADB39A8 13C82A63B603576156E30A4EA0EA981B66B0D967 41DB92713D3BF4BFF3EE91069C5E7FA2F54977D4"
+# nginx: the unexpired developer signing keys listed on https://nginx.org/en/pgp_keys.html (arut, pluknet,
+# thresh; the fourth listed key, sb, expired in 2016 and is not trusted).
+ARG NGINX_SIGNER_FPRS="43387825DDB1BB97EC36BA5D007C8D7C15D87369 D6786CE303D9A9022998DC6CC8464D549AF75C0A 13C82A63B603576156E30A4EA0EA981B66B0D967"
 # OWASP ModSecurity project (libmodsecurity and the nginx connector)
 ARG MODSECURITY_SIGNER_FPR=0B2BA1924065B44691202A2AD286E022149F0F6E
 # OWASP Core Rule Set project
@@ -135,26 +136,25 @@ RUN set -eux; \
     chmod 644 /etc/nginx/network_internal.conf
 
 COPY modsecurity/ /etc/nginx/modsec/
-COPY templates/ /etc/nginx/templates/
+# The image's own templates live outside /etc/nginx/templates, which stays free for users' templates
+# (official NGINX_ENVSUBST_* mechanism, untouched). 18-modsec-render.sh renders these ones.
+COPY templates/ /etc/nginx/modsec/templates/
 COPY --chmod=755 docker-entrypoint.d/ /docker-entrypoint.d/
 
-# Working directories: ModSecurity temp/data, rendered settings (the template step writes there), the
-# audit log (written by the unprivileged worker processes), and the two mount points for site rules.
+# Working directories: ModSecurity temp/data, rendered settings (the only place written at start; a
+# read-only root filesystem needs a tmpfs just there), and the two mount points for site rules.
 RUN set -eux; \
     mkdir -p /var/cache/modsecurity/tmp /var/cache/modsecurity/data \
         /etc/nginx/modsec/rendered /etc/nginx/modsec/custom.d /etc/nginx/modsec/after.d; \
-    chown -R nginx:nginx /var/cache/modsecurity; \
-    touch /var/log/nginx/modsec_audit.log; \
-    chown nginx:nginx /var/log/nginx/modsec_audit.log
+    chown -R nginx:nginx /var/cache/modsecurity
 
-# Defaults for the settings. Every one must be an ENV here: the official entrypoint's envsubst only
-# substitutes variables that are set.
-ENV NGINX_ENVSUBST_OUTPUT_DIR=/etc/nginx/modsec/rendered \
-    MODSEC_RULE_ENGINE=On \
+# Defaults for the settings (read by 18-modsec-render.sh). The audit log goes to stdout so it is in
+# `docker logs` and rotated by Docker; a file path is one variable away.
+ENV MODSEC_RULE_ENGINE=On \
     MODSEC_PARANOIA=1 \
     MODSEC_ANOMALY_INBOUND=5 \
     MODSEC_ANOMALY_OUTBOUND=4 \
     MODSEC_REQ_BODY_LIMIT=134217728 \
-    MODSEC_AUDIT_LOG=/var/log/nginx/modsec_audit.log \
+    MODSEC_AUDIT_LOG=/dev/stdout \
     MODSEC_AUDIT_FORMAT=JSON \
     MODSEC_DENY_STATUS=403

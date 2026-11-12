@@ -26,6 +26,11 @@ for fpr in "$@"; do
 done
 
 status=$(gpg --batch --status-fd 1 --verify "$sig" "$file" 2>/dev/null || true)
+# Only a plain GOODSIG counts: an expired, revoked or bad key or signature is refused.
+if echo "$status" | grep -qE '^\[GNUPG:\] (EXPKEYSIG|REVKEYSIG|EXPSIG|BADSIG|ERRSIG) '; then
+  echo "verify-signature: $file has an expired, revoked or bad signature or key" >&2; exit 1
+fi
+echo "$status" | grep -q '^\[GNUPG:\] GOODSIG ' || { echo "verify-signature: no good signature on $file" >&2; exit 1; }
 signer=$(echo "$status" | awk '$2=="VALIDSIG"{print $NF}')
 [ -n "$signer" ] || { echo "verify-signature: no valid signature on $file" >&2; exit 1; }
 for fpr in "$@"; do

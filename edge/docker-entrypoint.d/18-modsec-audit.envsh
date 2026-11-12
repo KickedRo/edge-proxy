@@ -1,9 +1,0 @@
-# Sourced by the nginx entrypoint before 20-envsubst-on-templates.sh renders the ModSecurity template.
-# MODSEC_AUDIT_LOG=off turns audit logging off; derive the engine and a harmless file name for it.
-# (No validation here: that is the job of the settings check.)
-if [ "${MODSEC_AUDIT_LOG}" = "off" ]; then
-    export MODSEC_AUDIT_ENGINE=Off
-    export MODSEC_AUDIT_LOG=/dev/null
-else
-    export MODSEC_AUDIT_ENGINE=RelevantOnly
-fi

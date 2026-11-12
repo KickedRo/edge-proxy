@@ -1,11 +1,11 @@
-# Settings derived from MODSEC_* environment variables. Rendered at container start by the official
-# nginx entrypoint (envsubst) into /etc/nginx/modsec/rendered/ and loaded after the CRS's crs-setup.conf.
+# Settings derived from MODSEC_* environment variables. Rendered at container start by
+# docker-entrypoint.d/18-modsec-render.sh (envsubst) into /etc/nginx/modsec/rendered/ and loaded after the CRS's crs-setup.conf.
 # Fixed settings are in modsecurity/modsecurity.conf; no directive appears in both.
 
 SecRuleEngine ${MODSEC_RULE_ENGINE}
 SecRequestBodyLimit ${MODSEC_REQ_BODY_LIMIT}
 
-# Audit log. MODSEC_AUDIT_ENGINE is derived from MODSEC_AUDIT_LOG by docker-entrypoint.d/18-modsec-audit.envsh.
+# Audit log. MODSEC_AUDIT_ENGINE is derived from MODSEC_AUDIT_LOG by docker-entrypoint.d/18-modsec-render.sh.
 SecAuditEngine ${MODSEC_AUDIT_ENGINE}
 SecAuditLog ${MODSEC_AUDIT_LOG}
 SecAuditLogFormat ${MODSEC_AUDIT_FORMAT}
