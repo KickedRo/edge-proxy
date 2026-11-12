@@ -57,10 +57,10 @@ jobs:
         run: |
           {
             echo 'edge<<EOF'
-            grep -v '^DOCKER_GEN' versions.env
+            grep -v -E '^(DOCKER_GEN|GO_)' versions.env
             echo 'EOF'
             echo 'gen<<EOF'
-            grep -E '^(DOCKER_GEN_VERSION|NGINX_PROXY_REF)=' versions.env
+            grep -E '^(GO_VERSION|DOCKER_GEN_VERSION|NGINX_PROXY_REF)=' versions.env
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
 

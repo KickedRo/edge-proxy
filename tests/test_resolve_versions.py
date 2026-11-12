@@ -37,6 +37,14 @@ class ResolveVersions(unittest.TestCase):
         self.assertEqual(v["MODSECURITY_NGINX_VERSION"], "v1.0.4")
         self.assertEqual(v["DOCKER_GEN_VERSION"], "0.17.2")
 
+    def test_go_version_highest_plain_tag(self):
+        r = run(FIX, self.out)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(parse(self.out)["GO_VERSION"], "1.27.3")
+
+    def test_malformed_golang_body_exits_2(self):
+        self._bad("dockerhub_golang.json", '{"count": 0}')
+
     def test_nginx_proxy_ref_from_pins(self):
         run(FIX, self.out)
         want = parse(os.path.join(ROOT, "pins.env"))["NGINX_PROXY_REF"]
@@ -46,7 +54,7 @@ class ResolveVersions(unittest.TestCase):
         run(FIX, self.out)
         with open(self.out) as f:
             lines = f.read().splitlines()
-        self.assertEqual(len(lines), 6)
+        self.assertEqual(len(lines), 7)
         for line in lines:
             k, _, val = line.partition("=")
             self.assertRegex(k, r"^[A-Z_]+$")

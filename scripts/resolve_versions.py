@@ -115,6 +115,56 @@ def nginx_version(major, fixtures):
     return ".".join(map(str, best))
 
 
+def read_tags(url):
+    """All tag names behind a Docker Hub tags URL, following every page."""
+    names = []
+    for _ in range(MAX_PAGES):
+        data = fetch_json(url)
+        names += tag_names(data)
+        url = data.get("next")
+        if not url:
+            return names
+    raise LookupError_(f"more than {MAX_PAGES} pages for {url}")
+
+
+def go_version(major, fixtures):
+    """Highest plain X.Y.Z tag of library/golang with X == major (no rc/beta, no -variant suffix)."""
+    major = int(major)
+
+    def plain(names, minor=None):
+        best = None
+        for n in names:
+            v = parse_version(n)
+            if v and v[0] == major and (minor is None or v[1] == minor) and (best is None or v > best):
+                best = v
+        return best
+
+    if fixtures:
+        data = fetch_json(None, os.path.join(fixtures, "dockerhub_golang.json"))
+        names = tag_names(data)
+        if data.get("next"):
+            raise LookupError_("Docker Hub tag list incomplete (more pages)")
+        best = plain(names)
+    else:
+        # golang has thousands of tags. The newest minor is read off the most recently updated tags of the
+        # major (rc tags included), then that minor and the ones below it are listed completely until one has
+        # a plain release.
+        base = "https://hub.docker.com/v2/repositories/library/golang/tags?page_size=100"
+        recent = tag_names(fetch_json(f"{base}&ordering=last_updated&name={major}."))
+        minors = [int(m.group(1)) for n in recent
+                  for m in [re.match(rf"{major}\.(\d+)(?:\.|rc|beta|$)", n)] if m]
+        if not minors:
+            raise LookupError_(f"no golang {major}.x tag found")
+        best = None
+        for minor in range(max(minors), -1, -1):
+            best = plain(read_tags(f"{base}&name={major}.{minor}."), minor)
+            if best:
+                break
+    if best is None:
+        raise LookupError_(f"no golang release in major {major}")
+    return ".".join(map(str, best))
+
+
 def github_version(repo, major, fixtures):
     fp = os.path.join(fixtures, "github_" + repo.replace("/", "_") + ".json") if fixtures else None
     data = fetch_json(f"https://api.github.com/repos/{repo}/releases?per_page=100", fp)
@@ -148,6 +198,7 @@ def main():
         res = [("NGINX_VERSION", nginx_version(pins["NGINX_MAJOR"], a.fixtures))]
         for key, repo, mk in GITHUB:
             res.append((key, github_version(repo, pins[mk], a.fixtures)))
+        res.append(("GO_VERSION", go_version(pins["GO_MAJOR"], a.fixtures)))
         res.append(("NGINX_PROXY_REF", pins["NGINX_PROXY_REF"]))
     except (LookupError_, KeyError, ValueError, TypeError, AttributeError, OSError) as e:
         print(f"resolve_versions: lookup failed: {e}", file=sys.stderr)
