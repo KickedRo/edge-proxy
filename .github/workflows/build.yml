@@ -48,7 +48,7 @@ jobs:
       - name: Security epoch
         id: epoch
         env:
-          OVERRIDE: proof2   # TEMPORARY (I1 proof), reverted next commit
+          OVERRIDE: ${{ inputs.security_epoch }}
         run: |
           epoch="${OVERRIDE:-$(date -u +%Y%m%d)}"
           case "$epoch" in *[!A-Za-z0-9._-]* | "") echo "bad security epoch" >&2; exit 1 ;; esac
