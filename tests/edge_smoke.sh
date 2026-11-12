@@ -35,6 +35,9 @@ cat > "$WORK/conf.d/test.conf" <<'CONF'
 server {
     listen 80 default_server;
     listen [::]:80 default_server;
+    # Plain-text HTTP/2 (h2c) so the test can speak HTTP/2 without a certificate.
+    listen 81;
+    http2 on;
     server_name app.example.com;
     # nginx refuses bodies above 1m by default; real deployments set this through nginx-proxy.
     # Raised here so the 20 MB upload test reaches ModSecurity and proves ITS limits allow it.
@@ -225,11 +228,15 @@ inspected acme_traversal_inspected_lit_post 't=tr4' "$A/../../wp-login.php?t=tr4
 inspected acme_bypass_anypath_newline 't=u1' "http://$RUN-on/wp-login.php?t=u1&q=<script>alert(1)</script>&z=%0A/.well-known/acme-challenge/a" -A nikto
 inspected acme_bypass_token_newline 't=u2' "$A/x%0A?t=u2&q=<script>alert(1)</script>" -A nikto --path-as-is
 inspected acme_bypass_fragment 't=u3' "http://$RUN-on" -A nikto --request-target '/.well-known/acme-challenge/x#?t=u3&id=1+UNION+SELECT+password+FROM+users'
-inspected acme_bypass_encoded_token 't=u4' "$A/%41bc?t=u4" -A nikto --path-as-is
-expect_eq acme_bypass_encoded_token_nikto "$(status "$A/%41bc" -A nikto --path-as-is)" 403
-expect_eq acme_bypass_cookie "$(status "$A/tok_en-1" -A nikto -H 'Cookie: a=b')" 403
-expect_eq acme_bypass_post_body "$(status "$A/tok_en-1" -A nikto --data 'a=b')" 403
-inspected acme_post_inspected 't=tr5' "$A/tok_en-1?t=tr5" --data-urlencode 'log=1 UNION SELECT password FROM users'
+inspected acme_bypass_encoded_token 'bc_e1' "$A/%41bc_e1" -A nikto --path-as-is
+inspected acme_bypass_cookie 'acme-challenge/tok_ck1' "$A/tok_ck1" -A nikto -H 'Cookie: a=b'
+inspected acme_bypass_post_body 'acme-challenge/tok_pb1' "$A/tok_pb1" -A nikto --data 'a=b'
+# HTTP/2 (h2c prior knowledge on port 81; chosen over TLS to avoid a throwaway certificate): a body needs
+# no Content-Length there, so the exemption is HTTP/1.x only.
+inspected acme_bypass_h2_get 'acme-challenge/tok_h21' "http://$RUN-on:81/.well-known/acme-challenge/tok_h21" -A nikto --http2-prior-knowledge
+inspected acme_bypass_h2_body 'acme-challenge/tok_h22' "http://$RUN-on:81/.well-known/acme-challenge/tok_h22" -A nikto --http2-prior-knowledge \
+  -X GET -H 'Content-Type: application/json' --data '{"id":"1 UNION SELECT password FROM users"}'
+inspected acme_post_inspected 'acme-challenge/tok_po1' "$A/tok_po1" --data-urlencode 'log=1 UNION SELECT password FROM users'
 
 # The audit entries survive a reload (the log is opened again by the new workers).
 docker exec "$RUN-on" nginx -s reload >/dev/null 2>&1
