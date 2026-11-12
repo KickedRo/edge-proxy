@@ -44,10 +44,10 @@ kickedro_settings() (
         case $2 in
             '<integer>') is_int "$1" 15;;
             '<time>') [ "$1" != 0 ] && ms "$1" >/dev/null;;
-            '<buffers>')
+            '<buffers>') # nginx refuses a size below connection_pool_size (512 on 64-bit): at least 1k
                 case $1 in
                     *' '*' '*) return 1;;
-                    *' '*) is_int "${1%% *}" 4 && bytes "${1#* }" >/dev/null;;
+                    *' '*) is_int "${1%% *}" 4 && size=$(bytes "${1#* }") && [ "$size" -ge 1024 ];;
                     *) return 1;;
                 esac;;
             '<path>')
@@ -82,23 +82,37 @@ kickedro_settings() (
             *) one_of "$1" "$2";;
         esac
     }
-    explain() { # ALLOWED -> the forms it uses, explained
-        case $1 in *'<integer>'*) printf ' <integer> is a whole number from 1.';; esac
-        case $1 in *'<time>'*) printf ' <time> is a whole number with the unit ms, s, m or h, e.g. 10s.';; esac
-        case $1 in *'<buffers>'*) printf ' <buffers> is a count and a size, e.g. 4 8k.';; esac
+    explain() { # ALLOWED -> the forms it uses, explained (as in the header of settings.tsv)
+        case $1 in *'<integer>'*) printf ' <integer> is a whole number from 1, at most 15 digits.';; esac
+        case $1 in *'<time>'*) printf ' <time> is a whole number from 1, at most 9 digits, with the unit ms, s, m or h, e.g. 10s.';; esac
+        case $1 in *'<buffers>'*) printf ' <buffers> is a count (1 to 4 digits) and a size of at least 1k (bytes, or with k or m, at most 7 digits), e.g. 4 8k.';; esac
         case $1 in *'<path>'*) printf ' <path> is an absolute file path (letters, digits and . _ / - only).';; esac
     }
+    malformed() { # line-number reason -> stop: the settings file itself is broken
+        echo "ERROR: $tsv line $1: $2" >&2
+        exit 1
+    }
 
+    # The same rules as scripts/gen_settings_doc.py: exactly seven TAB-separated fields, none empty or blank. The
+    # tabs are counted first, because read treats TAB as whitespace (empty fields would collapse, an eighth field
+    # would end up in the seventh). A last line without a newline is read too.
     invalid=0
-    while IFS=$tab read -r var default allowed weak risk what when; do
-        case $var in ''|'#'*) continue;; esac
+    number=0
+    while IFS= read -r line || [ -n "$line" ]; do
+        number=$((number + 1))
+        case $line in ''|'#'*) continue;; esac
+        tabs=$(printf '%s' "$line" | tr -cd '\t' | wc -c)
+        [ "$tabs" -eq 6 ] || malformed "$number" "$((tabs + 1)) fields, expected 7: ${line%%"$tab"*}"
+        IFS=$tab read -r var default allowed weak risk what when <<EOF
+$line
+EOF
+        for field in "$var" "$default" "$allowed" "$weak" "$risk" "$what" "$when"; do
+            case $field in *[![:space:]]*) ;; *) malformed "$number" "an empty field: ${line%%"$tab"*}";; esac
+        done
         case $var in
-            [A-Z]*[!A-Z0-9_]*|[!A-Z]*) echo "ERROR: $tsv: bad variable name '$var'" >&2; exit 1;;
+            [A-Z]*[!A-Z0-9_]*|[!A-Z]*) malformed "$number" "bad variable name '$var'";;
         esac
-        if [ -z "$when" ] || [ -z "$what" ] || [ -z "$risk" ]; then
-            echo "ERROR: $tsv: the line for $var does not have seven fields" >&2; exit 1
-        fi
-        case $default in *"'"*) echo "ERROR: $tsv: the default of $var contains a quote" >&2; exit 1;; esac
+        case $default in *"'"*) malformed "$number" "the default of $var contains a quote";; esac
 
         eval "value=\${$var:-}"
         if [ -z "$value" ]; then

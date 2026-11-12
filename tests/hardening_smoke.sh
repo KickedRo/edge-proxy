@@ -38,6 +38,7 @@ XSS_Q='q=<script>alert(1)</script>'
 # ---- test data ----------------------------------------------------------------------------------------------
 mkdir -p "$WORK/conf.d"
 cat > "$WORK/conf.d/test.conf" <<'CONF'
+proxy_cache_path /var/cache/nginx/test_cache levels=1 keys_zone=test_cache:1m;
 server {
     listen 80 default_server;
     server_name app.example.com;
@@ -52,6 +53,13 @@ server {
     # The image's rate-limit zones are usable from vhost configuration.
     location /login {
         limit_req zone=kickedro_login_1rs;
+        proxy_pass http://backend:80/;
+    }
+    # Cached proxying, as a vhost snippet may set up: a response from the cache has no upstream status of its own.
+    location /cached/ {
+        proxy_cache test_cache;
+        proxy_cache_valid any 1m;
+        add_header X-Cache-Status $upstream_cache_status always;
         proxy_pass http://backend:80/;
     }
 }
@@ -81,6 +89,22 @@ LOGS=$(docker logs "$RUN-invalid" 2>&1)
 [ "$CODE" != 0 ] && grep 'MODSEC_RULE_ENGINE' <<<"$LOGS" | grep -qF 'On|DetectionOnly|Off' \
   && pass invalid_refuses || fail invalid_refuses "exit code $CODE, log: $LOGS"
 
+# The settings check itself stops the container: a value that nginx and ModSecurity would accept (anything but "on"
+# just switches the headers off) must still stop it, before any later entrypoint script and before nginx starts.
+CONTAINERS+=("$RUN-invalid2")
+docker run -d --name "$RUN-invalid2" --network none -e EDGE_SECURITY_HEADERS=yes "$IMAGE" >/dev/null \
+  || fail invalid_stops_entrypoint "could not start the container"
+for _ in $(seq 1 50); do
+  [ "$(docker inspect -f '{{.State.Running}}' "$RUN-invalid2")" = false ] && break
+  sleep 0.2
+done
+[ "$(docker inspect -f '{{.State.Running}}' "$RUN-invalid2")" = false ] || fail invalid_stops_entrypoint "still running after 10 s"
+CODE=$(docker inspect -f '{{.State.ExitCode}}' "$RUN-invalid2")
+LOGS=$(docker logs "$RUN-invalid2" 2>&1)
+[ "$CODE" != 0 ] && grep 'EDGE_SECURITY_HEADERS' <<<"$LOGS" | grep -qF 'on|off' \
+  && ! grep -qE '18-kickedro-render|start worker process' <<<"$LOGS" \
+  && pass invalid_stops_entrypoint || fail invalid_stops_entrypoint "exit code $CODE, log: $LOGS"
+
 # Every value form is validated: one invalid value per form, all reported before the container stops.
 INVALID=(MODSEC_PARANOIA=5 MODSEC_ANOMALY_INBOUND=0 MODSEC_REQ_BODY_LIMIT=12ab MODSEC_AUDIT_LOG=relative.log
   MODSEC_DENY_STATUS=200 EDGE_CLIENT_HEADER_TIMEOUT=10 EDGE_LARGE_HEADER_BUFFERS=4 EDGE_SECURITY_HEADERS=yes)
@@ -90,6 +114,11 @@ for kv in "${INVALID[@]}"; do
   grep -q "^ERROR: ${kv%%=*}=" <<<"$OUT" || fail invalid_values_refused "no error for ${kv%%=*} in: $OUT"
 done
 pass invalid_values_refused
+# Header buffers smaller than nginx accepts are refused by the settings check (1k is the smallest size), not by nginx.
+OUT=$(docker run --rm -e EDGE_LARGE_HEADER_BUFFERS='4 1023' "$IMAGE" nginx -t 2>&1) && fail buffers_minimum "accepted: $OUT"
+grep -q "^ERROR: EDGE_LARGE_HEADER_BUFFERS=" <<<"$OUT" || fail buffers_minimum "not refused by the settings check: $OUT"
+OUT=$(docker run --rm -e EDGE_LARGE_HEADER_BUFFERS='4 1k' "$IMAGE" nginx -t 2>&1) || fail buffers_minimum "4 1k refused: $OUT"
+pass buffers_minimum
 
 # Values at or stricter than the defaults print nothing.
 OUT=$(docker run --rm -e EDGE_CLIENT_HEADER_TIMEOUT=5s -e EDGE_SEND_TIMEOUT=500ms -e EDGE_LARGE_HEADER_BUFFERS='2 8k' \
@@ -110,8 +139,26 @@ for kv in "${WEAK[@]}"; do
 done
 pass weaker_values_warn
 expect_eq rate_zones_off "$(grep -c '^limit_req_zone .*zone=kickedro_' <<<"$OUT" || true)" 0
-OUT=$(docker run --rm -e EDGE_LARGE_HEADER_BUFFERS='8 8k' "$IMAGE" nginx -t 2>&1) || fail weaker_buffer_count "nginx -t failed: $OUT"
+OUT=$(docker run --rm -e EDGE_LARGE_HEADER_BUFFERS='8 8k' -e MODSEC_AUDIT_LOG=/dev/null "$IMAGE" nginx -t 2>&1) \
+  || fail weaker_buffer_count "nginx -t failed: $OUT"
 expect_eq weaker_buffer_count "$(grep -c '^SECURITY: EDGE_LARGE_HEADER_BUFFERS=' <<<"$OUT" || true)" 1
+expect_eq weaker_audit_dev_null "$(grep -c '^SECURITY: MODSEC_AUDIT_LOG=' <<<"$OUT" || true)" 1
+
+# The settings file is read strictly, like scripts/gen_settings_doc.py: a line with an extra or an empty field stops
+# the container; a missing final newline does not lose the last setting.
+TSV=$(docker run --rm --entrypoint cat "$IMAGE" /usr/local/share/kickedro/settings.tsv) || fail settings_file_strict "cannot read the settings file"
+tsv_run() { # settings-file-content -> output of 'nginx -T' with that settings file (fails like the container does)
+  printf '%s' "$1" > "$WORK/settings.tsv"; chmod 644 "$WORK/settings.tsv"
+  docker run --rm -v "$WORK/settings.tsv:/usr/local/share/kickedro/settings.tsv:ro" "$IMAGE" nginx -T 2>&1
+}
+for bad in "$(sed '/^EDGE_SEND_TIMEOUT/s/$/\textra/' <<<"$TSV")" "$(sed '/^EDGE_SEND_TIMEOUT/s/\t10s\t/\t\t/' <<<"$TSV")"; do
+  OUT=$(tsv_run "$bad"$'\n') && fail settings_file_strict "accepted a malformed line: $(grep '^EDGE_SEND_TIMEOUT' <<<"$bad")"
+  grep -q 'ERROR: .*EDGE_SEND_TIMEOUT' <<<"$OUT" || fail settings_file_strict "no error naming the line: $OUT"
+done
+pass settings_file_strict
+OUT=$(tsv_run "$TSV") || fail settings_file_no_final_newline "nginx -T failed: $OUT"
+grep -qxF 'limit_req_zone $binary_remote_addr zone=kickedro_login_1rs:10m rate=1r/s;' <<<"$OUT" \
+  && pass settings_file_no_final_newline || fail settings_file_no_final_newline "the last setting (EDGE_RATE_ZONES) was lost"
 
 # The defaults end up in nginx's configuration (keepalive_timeout replaces the one of the stock nginx.conf).
 DUMP=$(docker run --rm "$IMAGE" nginx -T 2>&1) || fail defaults_rendered "nginx -T failed: $DUMP"
@@ -233,6 +280,27 @@ ETAG=$(header ETag)
 [ "$STATUS" = 200 ] && [ -n "$(header Content-Length)" ] && [ -n "$(header Last-Modified)" ] && [ "${ETAG:0:1}" = '"' ] \
   && pass html_responses_untouched || fail html_responses_untouched "$HEAD"
 
+# A backend's own error page with the deny status is the backend's: it passes the edge unchanged (with its
+# Content-Length), directly and from the edge's cache, where the response has no upstream status of its own.
+expect_backend_page() { # name edge path -> the backend's page for path, unchanged through edge, uncached and cached
+  local name=$1 edge=$2 path=$3 want_body want_len want_status
+  request "http://backend$path"
+  want_status=$STATUS want_body=$BODY want_len=$(header Content-Length)
+  [ -n "$want_len" ] || fail "$name" "the backend sent no Content-Length: $HEAD"
+  request "http://$edge$path"
+  [ "$STATUS|$(header Content-Length)" = "$want_status|$want_len" ] && [ "$BODY" = "$want_body" ] \
+    || fail "$name" "changed by the edge: $HEAD"$'\n'"$BODY"
+  pass "$name"
+  request "http://$edge/cached$path"  # stores it
+  request "http://$edge/cached$path"
+  [ "$(header X-Cache-Status)" = HIT ] || fail "${name}_cached" "not served from the cache: $HEAD"
+  [ "$STATUS|$(header Content-Length)" = "$want_status|$want_len" ] && [ "$BODY" = "$want_body" ] \
+    || fail "${name}_cached" "changed by the edge: $HEAD"$'\n'"$BODY"
+  pass "${name}_cached"
+}
+expect_backend_page backend_deny_page_untouched "$RUN-def" /forbidden
+expect_backend_page backend_deny_page_untouched_406 "$RUN-custom" /not-acceptable
+
 # Rate-limit zone from a vhost location: the second request within the same second is refused (503).
 expect_eq rate_zone_usable "$(docker exec "$CLIENT" curl -s -w '%{http_code} ' --max-time 10 -H 'Host: app.example.com' \
   -o /dev/null "http://$RUN-def/login" -o /dev/null "http://$RUN-def/login" || true)" '200 503 '
@@ -251,6 +319,11 @@ jq -e '(.transaction.request.uri | contains("t=bp1"))
   and any(.transaction.messages[]; .details.ruleId | startswith("941"))' <<<"$ENTRY" >/dev/null \
   || fail block_page_reference "the audit entry for $ID is not the blocked XSS request: $ENTRY"
 pass block_page_reference
+# The same on a cached location: ModSecurity blocks before the cache is consulted.
+request "http://$RUN-def/cached/?t=bp4&$XSS_Q"
+ID=$(reference)
+[ "$STATUS" = 403 ] && [ -n "$ID" ] && audit_id "$RUN-def" "$ID" >/dev/null \
+  && pass block_page_cached_location || fail block_page_cached_location "status $STATUS, body: $BODY"
 expect_eq headers_on_block_page "$(header X-Content-Type-Options)|$(header Referrer-Policy)|$(header X-Frame-Options)" \
   'nosniff|strict-origin-when-cross-origin|SAMEORIGIN'
 
@@ -268,6 +341,12 @@ EXPECTED=$(sed "s/{{request_id}}/$ID/g" "$WORK/block-page.html")
   || fail block_page_custom "body differs from the page: $(diff <(echo "$EXPECTED") <(echo "$BODY") | head -c 600)"
 audit_id "$RUN-custom" "$ID" >/dev/null || fail block_page_custom "no audit entry with transaction ID $ID"
 pass block_page_custom
+# Also for Chrome, which nginx otherwise sends padding comments after a short error page.
+request "http://$RUN-custom/?t=bp5&$XSS_Q" -A 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'
+ID=$(grep -oE '[0-9a-f]{32}' <<<"$BODY" | head -1 || true)
+EXPECTED=$(sed "s/{{request_id}}/$ID/g" "$WORK/block-page.html")
+[ "$STATUS" = 406 ] && [ -n "$ID" ] && [ "$BODY" = "$EXPECTED" ] \
+  && pass block_page_custom_chrome || fail block_page_custom_chrome "body differs: $(diff <(echo "$EXPECTED") <(echo "$BODY") | head -c 600)"
 
 # weakened_warns: exactly one SECURITY: line per weakened setting, and the container runs; the settings take effect.
 LOGS=$(docker logs "$RUN-weak" 2>&1)

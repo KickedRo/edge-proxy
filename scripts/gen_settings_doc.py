@@ -22,10 +22,11 @@ unset. At start the container checks every value. A value that is not allowed st
 variable and the allowed values. A value that is weaker than the default prints one line starting with `SECURITY:`,
 saying what protection is lost and linking here.
 
-Value forms: `<integer>` a whole number from 1; `<time>` a whole number with the unit `ms`, `s`, `m` or `h`
-(`10s`); `<buffers>` a count and a size separated by a space (`4 8k`; the size in bytes or with `k` or `m`);
-`<path>` an absolute file path (letters, digits and `. _ / -`). "Weaker" lists the values that print the
-`SECURITY:` line: "above" compares numbers by value, times by duration, and buffers by count or size.
+Value forms: `<integer>` a whole number from 1, at most 15 digits; `<time>` a whole number from 1, at most 9
+digits, with the unit `ms`, `s`, `m` or `h` (`10s`); `<buffers>` a count (1 to 4 digits) and a size of at least `1k`
+separated by a space (`4 8k`; the size in bytes or with `k` or `m`, at most 7 digits); `<path>` an absolute file path
+(letters, digits and `. _ / -`). "Weaker" lists the values that print the `SECURITY:` line: "above" compares numbers
+by value, times by duration, and buffers by count or size.
 
 | Variable | Default | What it does | If you weaken it | When you might |
 |---|---|---|---|---|

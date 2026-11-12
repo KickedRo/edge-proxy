@@ -7,10 +7,15 @@
 #
 # How: nginx-proxy's generated vhosts proxy "location /", so an error_page URI would be sent to the backend, and the
 # template is not ours to change. Instead an http-level sub_filter rewrites the body of nginx's own error page for the
-# deny status. Its match strings come from maps that are empty for every other response (another status, or a
-# response from an upstream), and a sub_filter whose match strings are all empty leaves the response alone (no change
-# to Content-Length, Last-Modified or ETag). The page text is held in geo variables, whose values nginx takes literally
-# ($ is not interpreted), in pieces well below nginx's 4 KiB limit for one configuration token.
+# deny status. Its match strings come from maps that are empty for every other response, and a sub_filter whose match
+# strings are all empty leaves the response alone (no change to Content-Length, Last-Modified or ETag). The maps are
+# set only when the status is the deny status and both $upstream_status and $upstream_cache_status are empty: no
+# upstream answered this request, and no cache was consulted for it (with proxy_cache and the like, every outcome,
+# MISS, BYPASS, HIT, STALE, UPDATING, EXPIRED or REVALIDATED, sets $upstream_cache_status; a cache HIT has no upstream
+# status). So nginx itself produced the response, and the match strings are exactly nginx's built-in page: a backend's
+# page with the same status, fresh or from a cache, is never touched. The page text is held in geo variables, whose
+# values nginx takes literally ($ is not interpreted), in pieces well below nginx's 4 KiB limit for one configuration
+# token. msie_padding is switched off, so Chrome and MSIE also get exactly the page.
 set -eu
 
 custom=/etc/nginx/kickedro/block-page.html
@@ -71,7 +76,7 @@ awk -v status="$MODSEC_DENY_STATUS" -v title="$title" -v source="$page" '
         }
     }
     function map(name, value) { # a match string, set only for the error page nginx itself sends with the deny status
-        printf "map \"$status:$upstream_status\" $%s {\n    volatile;\n    default \"\";\n    \"%s:\" \"%s\";\n}\n", name, status, value
+        printf "map \"$status:$upstream_status:$upstream_cache_status\" $%s {\n    volatile;\n    default \"\";\n    \"%s::\" \"%s\";\n}\n", name, status, value
     }
     BEGIN { RS = "\001" }
     { page = (NR > 1) ? page RS $0 : $0 }
@@ -96,6 +101,8 @@ awk -v status="$MODSEC_DENY_STATUS" -v title="$title" -v source="$page" '
         printf "sub_filter $kickedro_block_head \"%s\";\n", replacement
         print "sub_filter $kickedro_block_tail \"\";"
         print "sub_filter $kickedro_block_tail_version \"\";"
+        # nginx appends padding comments to short error pages for MSIE and Chrome ("friendly error pages").
+        print "msie_padding off;"
     }
 ' "$page" > "$conf.tmp"
 mv "$conf.tmp" "$conf"
