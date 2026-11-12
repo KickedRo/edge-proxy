@@ -60,6 +60,26 @@ class ResolveVersions(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
         self.assertFalse(os.path.exists(self.out))
 
+    def _bad(self, name, body):
+        d = os.path.join(self.tmp, "fx")
+        shutil.copytree(FIX, d)
+        with open(os.path.join(d, name), "w") as f:
+            f.write(body)
+        r = run(d, self.out)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertFalse(os.path.exists(self.out))
+
+    def test_incomplete_dockerhub_list_exits_2(self):
+        self._bad("dockerhub_nginx.json",
+                  '{"next": "https://example.com/page2", "results": [{"name": "1.29.1"}]}')
+
+    def test_malformed_dockerhub_body_exits_2(self):
+        self._bad("dockerhub_nginx.json", '{"count": 0}')
+
+    def test_malformed_github_body_exits_2(self):
+        self._bad("github_coreruleset_coreruleset.json", '{"message": "rate limited"}')
+
 
 if __name__ == "__main__":
     unittest.main()
