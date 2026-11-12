@@ -81,6 +81,12 @@ status() { # name url [curl args...] -> http status
   local u=$1; shift
   docker exec "$CLIENT" curl -s -g -o /dev/null -w '%{http_code}' -H 'Host: app.example.com' "$@" "$u" || true
 }
+status_stdin() { # url [curl args...] < body -> http status
+  # The body is streamed from stdin (curl -T -, docker exec -i), so curl does not know its size and
+  # sends no Content-Length: chunked on HTTP/1.1, bare DATA frames on HTTP/2.
+  local u=$1; shift
+  docker exec -i "$CLIENT" curl -s -g -o /dev/null -w '%{http_code}' -H 'Host: app.example.com' -T - "$@" "$u" || true
+}
 audit_lines() { # container marker -> audit JSON objects whose request uri contains marker
   # The audit log goes to the container's stdout next to the access log, so select the audit objects
   # (lines starting with {"transaction") and parse them with jq; a line that is not valid JSON is an error.
@@ -218,6 +224,11 @@ inspected() { # name marker url [curl args...]  -> 403 and an audit entry
   expect_eq "$name" "$(status "$url" "$@")" 403
   wait_audit "$RUN-on" "$marker" >/dev/null || fail "$name" "no audit entry"
 }
+inspected_stdin() { # name marker url [curl args...] < body -> 403 and an audit entry (body sent without a length)
+  local name=$1 marker=$2 url=$3; shift 3
+  expect_eq "$name" "$(status_stdin "$url" "$@")" 403
+  wait_audit "$RUN-on" "$marker" >/dev/null || fail "$name" "no audit entry"
+}
 A="http://$RUN-on/.well-known/acme-challenge"
 inspected acme_query_inspected 't=aq1' "$A/x?t=aq1&q=<script>alert(1)</script>"
 inspected acme_traversal_inspected_enc_get 't=tr1' "$A/%2e%2e/%2e%2e/wp-login.php?t=tr1&q=<script>alert(1)</script>" --path-as-is
@@ -231,11 +242,17 @@ inspected acme_bypass_fragment 't=u3' "http://$RUN-on" -A nikto --request-target
 inspected acme_bypass_encoded_token 'bc_e1' "$A/%41bc_e1" -A nikto --path-as-is
 inspected acme_bypass_cookie 'acme-challenge/tok_ck1' "$A/tok_ck1" -A nikto -H 'Cookie: a=b'
 inspected acme_bypass_post_body 'acme-challenge/tok_pb1' "$A/tok_pb1" -A nikto --data 'a=b'
+# A GET with a body, one test per header that announces it on HTTP/1.1 (each guards its own chain link:
+# the other header is absent, so only that link stops the exemption).
+inspected acme_bypass_get_cl 'acme-challenge/tok_cl1' "$A/tok_cl1" -A nikto --http1.1 -X GET --data 'a=b'
+inspected acme_bypass_get_te 'acme-challenge/tok_te1' "$A/tok_te1" -A nikto --http1.1 -X GET -H 'Transfer-Encoding: chunked' --data 'a=b'
 # HTTP/2 (h2c prior knowledge on port 81; chosen over TLS to avoid a throwaway certificate): a body needs
 # no Content-Length there, so the exemption is HTTP/1.x only.
 inspected acme_bypass_h2_get 'acme-challenge/tok_h21' "http://$RUN-on:81/.well-known/acme-challenge/tok_h21" -A nikto --http2-prior-knowledge
-inspected acme_bypass_h2_body 'acme-challenge/tok_h22' "http://$RUN-on:81/.well-known/acme-challenge/tok_h22" -A nikto --http2-prior-knowledge \
-  -X GET -H 'Content-Type: application/json' --data '{"id":"1 UNION SELECT password FROM users"}'
+# The body is streamed from stdin, so it goes out as DATA frames with no content-length and neither header
+# link applies: only the protocol link stops it. (--data would send content-length and hide a missing one.)
+inspected_stdin acme_bypass_h2_body 'acme-challenge/tok_h22' "http://$RUN-on:81/.well-known/acme-challenge/tok_h22" \
+  -A nikto --http2-prior-knowledge -X GET -H 'Content-Type: application/json' <<<'{"id":"1 UNION SELECT password FROM users"}'
 inspected acme_post_inspected 'acme-challenge/tok_po1' "$A/tok_po1" --data-urlencode 'log=1 UNION SELECT password FROM users'
 
 # The audit entries survive a reload (the log is opened again by the new workers).
