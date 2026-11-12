@@ -12,8 +12,6 @@ volumes:
 
 networks:
   proxy:
-  private:
-    internal: true
 
 services:
   nginx-proxy:
@@ -27,6 +25,7 @@ services:
       MODSEC_RULE_ENGINE: "On"
     cap_drop: [ALL]
     cap_add: [CHOWN, SETUID, SETGID, DAC_OVERRIDE]
+    security_opt: ["no-new-privileges:true"]
     volumes:
       - nginx_conf:/etc/nginx/conf.d:ro
       - nginx_vhost:/etc/nginx/vhost.d:ro
@@ -35,9 +34,8 @@ services:
       - nginx_dhparam:/etc/nginx/dhparam:ro
       - nginx_errors:/usr/share/nginx/html/errors:ro
     labels:
-      # nginx-proxy's documented label, and a per-run one: the gen container is told to look for the second, so
-      # other nginx-proxy containers on a shared Docker host cannot be mistaken for this one.
-      - com.github.nginx-proxy.nginx-proxy.nginx=true
+      # Per-run label instead of the default one: the gen container is told to look for it, and other
+      # nginx-proxy / docker-gen setups on a shared Docker host cannot pick this container as "their" nginx.
       - ${RUN:?}.nginx=true
 
   nginx-proxy-gen:
@@ -50,12 +48,12 @@ services:
     environment:
       NGINX_CONTAINER_LABEL: "${RUN:?}.nginx"
       DHPARAM_SKIP: "false"
-      TRUST_DOWNSTREAM_PROXY: "false"
-    # The image's default command with the notify target changed to this run's edge container
-    # (tests/split_smoke.sh asserts that the image default is otherwise exactly this).
-    command: ["docker-gen", "-watch", "-wait", "100ms:500ms", "-notify-container", "${RUN:?}-edge", "-notify-signal", "1",
-              "/app/nginx.tmpl", "/etc/nginx/conf.d/default.conf"]
+      TRUST_DOWNSTREAM_PROXY: "false" # no trusted proxy in front in this test; also silences the entrypoint's warning
+      # Real deployments: with network_mode none the entrypoint reads gen's own (empty) resolv.conf, so set RESOLVERS
+      # explicitly to the resolver nginx should use.
+    # No command: the image's default command runs, only the label above is set.
     volumes:
+      # Rootful Docker's socket path; rootless Docker and Docker Desktop use another one.
       - /var/run/docker.sock:/tmp/docker.sock:ro
       - nginx_conf:/etc/nginx/conf.d # written by docker-gen
       - nginx_vhost:/etc/nginx/vhost.d:ro
@@ -70,3 +68,12 @@ services:
     networks: [proxy]
     environment:
       VIRTUAL_HOST: app.example.com
+
+  # Second backend, started by the test only (profile), to carry the deliberately broken vhost snippet.
+  broken:
+    image: ${BACKEND_IMAGE:?}
+    container_name: ${RUN:?}-broken
+    profiles: [broken]
+    networks: [proxy]
+    environment:
+      VIRTUAL_HOST: broken.example.com
