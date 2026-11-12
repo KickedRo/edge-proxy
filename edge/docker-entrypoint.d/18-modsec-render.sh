@@ -24,6 +24,6 @@ vars="$vars"' ${MODSEC_DENY_STATUS}'
 
 for template in "$src"/*.template; do
     target="$out/$(basename "${template%.template}")"
-    echo "18-modsec-render.sh: rendering $template to $target"
+    [ -n "${NGINX_ENTRYPOINT_QUIET_LOGS:-}" ] || echo "18-modsec-render.sh: rendering $template to $target"
     envsubst "$vars" < "$template" > "$target"
 done

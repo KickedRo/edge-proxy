@@ -84,12 +84,20 @@ audit_lines() { # container marker -> audit JSON objects whose request uri conta
   local logs
   logs=$(docker logs "$1" 2>/dev/null | grep '^{"transaction"' || true)
   [ -z "$logs" ] && return 0
+  # Every selected line must be valid JSON; otherwise fail (non-zero), so neither a presence nor an
+  # absence check can pass on a log it could not read.
+  jq empty <<<"$logs" >/dev/null 2>&1 || { echo "audit_lines: invalid JSON in the audit log of $1" >&2; return 1; }
   jq -c --arg m "$2" 'select((.transaction.request.uri // "") | contains($m))' <<<"$logs"
+}
+audit_absent() { # container marker -> pass only if the audit log is readable and has no such entry
+  local out
+  out=$(audit_lines "$1" "$2") || return 1
+  [ -z "$out" ]
 }
 wait_audit() { # container marker -> prints the lines once present (up to 5 s)
   local i out
   for i in $(seq 1 25); do
-    out=$(audit_lines "$1" "$2")
+    out=$(audit_lines "$1" "$2") || return 1
     [ -n "$out" ] && { printf '%s\n' "$out"; return 0; }
     sleep 0.2
   done
@@ -194,10 +202,11 @@ expect_eq body_json_xss_on "$(status "http://$RUN-on/" -H 'Content-Type: applica
 # so that is the probe: blocked on /, passes on a token path.
 expect_eq acme_control_blocked "$(status "http://$RUN-on/" -A nikto)" 403
 expect_eq acme_exempt "$(status "http://$RUN-on/.well-known/acme-challenge/tok_en-1" -A nikto)" 200
+expect_eq acme_exempt_head "$(status "http://$RUN-on/.well-known/acme-challenge/tok_en-1" -A nikto -I)" 200
 # A later blocked request proves the (serial) audit log has caught up before we look for the ACME entry.
 status "http://$RUN-on/?t=xss2&q=<script>alert(2)</script>" >/dev/null
 wait_audit "$RUN-on" 't=xss2' >/dev/null || fail acme_exempt "audit log did not catch up"
-[ -z "$(audit_lines "$RUN-on" 'acme-challenge/tok_en-1')" ] && pass acme_exempt_no_audit \
+audit_absent "$RUN-on" 'acme-challenge/tok_en-1' && pass acme_exempt_no_audit \
   || fail acme_exempt_no_audit "audit entry exists for the validation request"
 
 # Everything else under the prefix is inspected: query strings and traversal (encoded and literal, GET and POST).
@@ -212,6 +221,14 @@ inspected acme_traversal_inspected_enc_get 't=tr1' "$A/%2e%2e/%2e%2e/wp-login.ph
 inspected acme_traversal_inspected_lit_get 't=tr2' "$A/../../wp-login.php?t=tr2&q=<script>alert(1)</script>" --path-as-is
 inspected acme_traversal_inspected_enc_post 't=tr3' "$A/%2e%2e/%2e%2e/wp-login.php?t=tr3" --path-as-is --data-urlencode 'log=1 UNION SELECT password FROM users'
 inspected acme_traversal_inspected_lit_post 't=tr4' "$A/../../wp-login.php?t=tr4" --path-as-is --data-urlencode 'log=1 UNION SELECT password FROM users'
+# Bypass attempts: REQUEST_URI is decoded and ^/$ match at %0A, so these must all be inspected.
+inspected acme_bypass_anypath_newline 't=u1' "http://$RUN-on/wp-login.php?t=u1&q=<script>alert(1)</script>&z=%0A/.well-known/acme-challenge/a" -A nikto
+inspected acme_bypass_token_newline 't=u2' "$A/x%0A?t=u2&q=<script>alert(1)</script>" -A nikto --path-as-is
+inspected acme_bypass_fragment 't=u3' "http://$RUN-on" -A nikto --request-target '/.well-known/acme-challenge/x#?t=u3&id=1+UNION+SELECT+password+FROM+users'
+inspected acme_bypass_encoded_token 't=u4' "$A/%41bc?t=u4" -A nikto --path-as-is
+expect_eq acme_bypass_encoded_token_nikto "$(status "$A/%41bc" -A nikto --path-as-is)" 403
+expect_eq acme_bypass_cookie "$(status "$A/tok_en-1" -A nikto -H 'Cookie: a=b')" 403
+expect_eq acme_bypass_post_body "$(status "$A/tok_en-1" -A nikto --data 'a=b')" 403
 inspected acme_post_inspected 't=tr5' "$A/tok_en-1?t=tr5" --data-urlencode 'log=1 UNION SELECT password FROM users'
 
 # The audit entries survive a reload (the log is opened again by the new workers).

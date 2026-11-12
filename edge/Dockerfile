@@ -141,15 +141,17 @@ COPY modsecurity/ /etc/nginx/modsec/
 COPY templates/ /etc/nginx/modsec/templates/
 COPY --chmod=755 docker-entrypoint.d/ /docker-entrypoint.d/
 
-# Working directories: ModSecurity temp/data, rendered settings (the only place written at start; a
-# read-only root filesystem needs a tmpfs just there), and the two mount points for site rules.
+# Working directories: ModSecurity temp/data, rendered settings, and the two mount points for site rules.
+# A read-only root filesystem needs a tmpfs at /etc/nginx/modsec/rendered (written at start), at the
+# stock nginx paths /var/cache/nginx and /run, and at /var/cache/modsecurity.
 RUN set -eux; \
     mkdir -p /var/cache/modsecurity/tmp /var/cache/modsecurity/data \
         /etc/nginx/modsec/rendered /etc/nginx/modsec/custom.d /etc/nginx/modsec/after.d; \
     chown -R nginx:nginx /var/cache/modsecurity
 
 # Defaults for the settings (read by 18-modsec-render.sh). The audit log goes to stdout so it is in
-# `docker logs` and rotated by Docker; a file path is one variable away.
+# `docker logs`. Docker's default json-file driver does not rotate unless max-size is configured (or another
+# logging driver is used); a file path is one variable away.
 ENV MODSEC_RULE_ENGINE=On \
     MODSEC_PARANOIA=1 \
     MODSEC_ANOMALY_INBOUND=5 \
