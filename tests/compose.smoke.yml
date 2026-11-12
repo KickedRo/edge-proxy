@@ -1,0 +1,72 @@
+# Compose file for tests/split_smoke.sh: nginx-proxy's "separate containers" layout with the edge and gen images.
+# Not meant to be run by hand: the script sets the variables below, a unique project name per run, and cleans up.
+#   EDGE_IMAGE, GEN_IMAGE, RUN (unique suffix for container names and the nginx container label),
+#   BACKEND_IMAGE, HTTP_PORT / HTTPS_PORT (host ports on 127.0.0.1; empty = Docker picks one).
+volumes:
+  nginx_conf:
+  nginx_vhost:
+  nginx_certs:
+  nginx_htpasswd:
+  nginx_errors:
+  nginx_dhparam:
+
+networks:
+  proxy:
+  private:
+    internal: true
+
+services:
+  nginx-proxy:
+    image: ${EDGE_IMAGE:?}
+    container_name: ${RUN:?}-edge
+    networks: [proxy]
+    ports:
+      - "127.0.0.1:${HTTP_PORT:-}:80"
+      - "127.0.0.1:${HTTPS_PORT:-}:443"
+    environment:
+      MODSEC_RULE_ENGINE: "On"
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETUID, SETGID, DAC_OVERRIDE]
+    volumes:
+      - nginx_conf:/etc/nginx/conf.d:ro
+      - nginx_vhost:/etc/nginx/vhost.d:ro
+      - nginx_htpasswd:/etc/nginx/htpasswd:ro
+      - nginx_certs:/etc/nginx/certs:ro
+      - nginx_dhparam:/etc/nginx/dhparam:ro
+      - nginx_errors:/usr/share/nginx/html/errors:ro
+    labels:
+      # nginx-proxy's documented label, and a per-run one: the gen container is told to look for the second, so
+      # other nginx-proxy containers on a shared Docker host cannot be mistaken for this one.
+      - com.github.nginx-proxy.nginx-proxy.nginx=true
+      - ${RUN:?}.nginx=true
+
+  nginx-proxy-gen:
+    image: ${GEN_IMAGE:?}
+    container_name: ${RUN:?}-gen
+    # No network at all: it only reads the Docker socket and writes files.
+    network_mode: none
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      NGINX_CONTAINER_LABEL: "${RUN:?}.nginx"
+      DHPARAM_SKIP: "false"
+      TRUST_DOWNSTREAM_PROXY: "false"
+    # The image's default command with the notify target changed to this run's edge container
+    # (tests/split_smoke.sh asserts that the image default is otherwise exactly this).
+    command: ["docker-gen", "-watch", "-wait", "100ms:500ms", "-notify-container", "${RUN:?}-edge", "-notify-signal", "1",
+              "/app/nginx.tmpl", "/etc/nginx/conf.d/default.conf"]
+    volumes:
+      - /var/run/docker.sock:/tmp/docker.sock:ro
+      - nginx_conf:/etc/nginx/conf.d # written by docker-gen
+      - nginx_vhost:/etc/nginx/vhost.d:ro
+      - nginx_htpasswd:/etc/nginx/htpasswd:ro
+      - nginx_certs:/etc/nginx/certs:ro
+      - nginx_dhparam:/etc/nginx/dhparam # written by the entrypoint (RFC 7919 group copied in)
+      - nginx_errors:/usr/share/nginx/html/errors:ro
+
+  whoami:
+    image: ${BACKEND_IMAGE:?}
+    container_name: ${RUN:?}-whoami
+    networks: [proxy]
+    environment:
+      VIRTUAL_HOST: app.example.com
