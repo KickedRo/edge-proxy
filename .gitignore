@@ -2,3 +2,4 @@ build/
 *.pem
 .env
 __pycache__/
+.superpowers/
