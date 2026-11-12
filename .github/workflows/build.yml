@@ -1,0 +1,117 @@
+name: build
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Official Trivy image, pinned by digest (0.76.2). The vulnerability DB comes from the ECR mirror first,
+  # because ghcr.io rate-limits anonymous DB downloads.
+  TRIVY_IMAGE: ghcr.io/aquasecurity/trivy@sha256:8f6bb947dbc528902e11f2f5be52f7b519f6a39d5d148f41166f2040499768fb
+  TRIVY_DB_REPOSITORY: public.ecr.aws/aquasecurity/trivy-db:2,ghcr.io/aquasecurity/trivy-db:2
+
+jobs:
+  # Looks up the newest upstream versions (nginx, ModSecurity, CRS, docker-gen, nginx-proxy pin) once; later
+  # jobs build from this one file, so everything in a run uses the same versions.
+  resolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Resolve upstream versions
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/resolve_versions.py --out versions.env && cat versions.env
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: versions
+          path: versions.env
+          if-no-files-found: error
+
+  build-test:
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: versions
+      - name: Build arguments from the resolved versions
+        id: args
+        run: |
+          {
+            echo 'edge<<EOF'
+            grep -v '^DOCKER_GEN' versions.env
+            echo 'EOF'
+            echo 'gen<<EOF'
+            grep -E '^(DOCKER_GEN_VERSION|NGINX_PROXY_REF)=' versions.env
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Unit tests and ignore-file check
+        run: |
+          python3 -m unittest discover -s tests -p 'test_*.py' -v
+          python3 scripts/check_trivyignore.py .trivyignore.yaml
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build edge
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: edge
+          load: true
+          tags: edge-proxy:ci
+          build-args: ${{ steps.args.outputs.edge }}
+          cache-from: type=gha,scope=edge
+          cache-to: type=gha,scope=edge,mode=max
+      - name: Build gen
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: gen
+          load: true
+          tags: edge-proxy-gen:ci
+          build-args: ${{ steps.args.outputs.gen }}
+          cache-from: type=gha,scope=gen
+          cache-to: type=gha,scope=gen,mode=max
+
+      - name: Smoke test edge
+        run: tests/edge_smoke.sh edge-proxy:ci
+      - name: Smoke test edge with gen (split layout)
+        run: tests/split_smoke.sh edge-proxy:ci edge-proxy-gen:ci
+      - name: Hardening smoke test
+        run: tests/hardening_smoke.sh edge-proxy:ci
+
+      # Fails on any fixable HIGH or CRITICAL finding that .trivyignore.yaml does not list. Scans the saved
+      # image archives, so Trivy needs no access to the Docker socket.
+      - name: Trivy scan
+        run: |
+          mkdir "$RUNNER_TEMP/scan"
+          docker save edge-proxy:ci -o "$RUNNER_TEMP/scan/edge.tar"
+          docker save edge-proxy-gen:ci -o "$RUNNER_TEMP/scan/gen.tar"
+          docker pull -q "$TRIVY_IMAGE" >/dev/null
+          status=0
+          for image in edge gen; do
+            echo "::group::trivy $image"
+            docker run --rm -e TRIVY_DB_REPOSITORY -e TRIVY_NO_PROGRESS=true \
+              -v "$RUNNER_TEMP/scan:/scan:ro" -v "$PWD/.trivyignore.yaml:/.trivyignore.yaml:ro" \
+              "$TRIVY_IMAGE" image --input "/scan/$image.tar" \
+              --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 \
+              --ignorefile /.trivyignore.yaml || status=1
+            echo "::endgroup::"
+          done
+          exit "$status"

@@ -30,6 +30,11 @@ ENV NGINX_PROXY_VERSION=${NGINX_PROXY_REF} \
     DHPARAM_SKIP=true \
     NGINX_CONTAINER_LABEL=com.github.nginx-proxy.nginx-proxy.nginx
 
+# Debian security fixes newer than the base image (CI fails on fixable HIGH/CRITICAL findings).
+RUN apt-get update \
+    && apt-get -y upgrade \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN mkdir -p /etc/nginx/conf.d /etc/nginx/vhost.d /etc/nginx/htpasswd /etc/nginx/dhparam /etc/nginx/certs \
         /usr/share/nginx/html/errors
 

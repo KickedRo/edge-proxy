@@ -105,9 +105,11 @@ FROM nginx:${NGINX_VERSION}
 ARG NGINX_PROXY_REF
 
 # Runtime libraries only (no compilers or build tools). libstdc++6, libpcre2-8-0 and zlib come with
-# the official image already or as dependencies.
+# the official image already or as dependencies. The upgrade picks up Debian security fixes that are newer
+# than the base image (CI fails on fixable HIGH/CRITICAL findings, so a rebuild is the fix).
 RUN set -eux; \
     apt-get update; \
+    apt-get -y upgrade; \
     apt-get install -y --no-install-recommends libxml2 libyajl2 libstdc++6; \
     rm -rf /var/lib/apt/lists/*
 
