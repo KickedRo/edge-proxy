@@ -1,0 +1,32 @@
+edge-proxy
+Copyright (c) 2026 KickedRo, MIT License (see LICENSE).
+
+The images built from this repository contain, and the build downloads, the
+following third-party software. Each remains under its own licence and
+copyright.
+
+nginx                  BSD-2-Clause
+                       Copyright (C) 2002-2021 Igor Sysoev
+                       Copyright (C) 2011-2026 Nginx, Inc.
+                       https://nginx.org/LICENSE
+ModSecurity (v3)       Apache License 2.0
+                       Copyright OWASP ModSecurity project contributors
+                       (originally Trustwave Holdings, Inc.)
+                       https://github.com/owasp-modsecurity/ModSecurity
+ModSecurity-nginx      Apache License 2.0
+                       Copyright OWASP ModSecurity project contributors
+                       (originally Trustwave Holdings, Inc.)
+                       https://github.com/owasp-modsecurity/ModSecurity-nginx
+OWASP CRS (Core Rule Set) Apache License 2.0
+                       Copyright 2026 OWASP CRS project
+                       https://github.com/coreruleset/coreruleset
+nginx-proxy            MIT License
+                       Copyright (c) 2014-2020 Jason Wilder
+                       Copyright (c) 2021-2022 Nicolas Duchon
+                       https://github.com/nginx-proxy/nginx-proxy
+docker-gen             MIT License
+                       Copyright (c) 2014-2021 Jason Wilder
+                       https://github.com/nginx-proxy/docker-gen
+
+The images are also based on Debian GNU/Linux and contain Debian packages
+under their respective licences.
