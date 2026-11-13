@@ -33,10 +33,12 @@ docker run -d --name "$RUN-registry" -p "127.0.0.1:${PORT_1:-}:5000" "$REGISTRY_
 port=$(docker port "$RUN-registry" 5000/tcp | head -n 1)
 port=${port##*:}
 REG="localhost:$port/rehearsal"
-# Plain HTTP for this registry only; host networking so BuildKit reaches 127.0.0.1.
+# Plain HTTP for this registry only; host networking so BuildKit reaches 127.0.0.1. No GitHub event payload in
+# the provenance, like the publish job's builder.
 printf '[registry."localhost:%s"]\n  http = true\n' "$port" > "$TMP/buildkitd.toml"
 docker buildx create --name "$RUN" --driver docker-container --driver-opt network=host \
-  --buildkitd-config "$TMP/buildkitd.toml" --bootstrap >/dev/null 2>&1
+  --driver-opt provenance-add-gha=false --buildkitd-config "$TMP/buildkitd.toml" --bootstrap >"$TMP/builder.log" 2>&1 \
+  || { cat "$TMP/builder.log" >&2; fail setup "could not create the buildx builder"; }
 export BUILDX_BUILDER="$RUN"
 
 decide() { "$P" decide "$@"; }   # its reasons go to stderr, into the log
@@ -51,10 +53,13 @@ pass push_by_digest_with_same_bits_check
 for ref in "$REG/edge@$edge" "$REG/gen@$gen"; do
   n=$(docker buildx imagetools inspect "$ref" --format '{{json .SBOM}}' | jq '.SPDX.packages | length')
   [ "$n" -gt 50 ] || fail sbom "$ref: $n packages in the SBOM"
-  docker buildx imagetools inspect "$ref" --format '{{json .Provenance}}' | jq -e '.SLSA != null' >/dev/null \
-    || fail provenance "$ref: no provenance"
+  docker buildx imagetools inspect "$ref" --format '{{json .Provenance}}' > "$TMP/provenance.json"
+  jq -e '.SLSA != null' "$TMP/provenance.json" >/dev/null || fail provenance "$ref: no provenance"
+  if grep -q github_event_payload "$TMP/provenance.json"; then
+    fail provenance "$ref: the provenance carries the GitHub event payload"
+  fi
 done
-pass sbom_and_provenance_attached
+pass sbom_and_provenance_attached_without_event_payload
 
 "$P" tag "$REG/edge" "$edge" latest rehearsal-tag
 "$P" tag "$REG/gen" "$gen" latest rehearsal-tag

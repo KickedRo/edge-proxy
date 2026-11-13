@@ -21,7 +21,7 @@
 #                binary (which also covers its Go version and module versions).
 # The images must be present locally; they are run with --pull=never and no network.
 # BUILD_KEY_INPUTS=FILE also writes the canonical text to FILE (CI prints it, so the reason for a new key can be read
-# in the log). Exit 0 with the key, 1 on any failure (unreadable file, missing image or binary, no base image in a
+# in the log). Exit 0 with the key, non-zero on any failure (unreadable file, missing image or binary, no base image in a
 # metadata file): never a partial key.
 set -euo pipefail
 

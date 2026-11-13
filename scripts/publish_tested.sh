@@ -31,7 +31,7 @@
 #     unchanged) and verifies that every tag now resolves to DIGEST.
 #
 # The buildx builder is the current one (BUILDX_BUILDER selects another); registry credentials come from
-# `docker login`. Exit 0 on success, 1 on any failure, 2 on usage errors.
+# `docker login`. Exit 0 on success, 2 on usage errors, another non-zero status on any failure.
 set -euo pipefail
 
 # BuildKit's SBOM generator, docker/buildkit-syft-scanner 1.12.1 (the stable-1 tag on 2026-11-13), pinned by digest.
