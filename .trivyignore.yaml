@@ -1,0 +1,6 @@
+# Trivy exceptions for the CI scan (HIGH and CRITICAL, fixed-only). Empty on purpose: a fixable finding is fixed by
+# rebuilding (the images run a security upgrade), not excepted. If one ever has to be excepted, every entry needs
+#   - id: CVE-YYYY-NNNN
+#     statement: why it does not apply or why it cannot be fixed yet
+#     expired_at: YYYY-MM-DD      (at most 30 days ahead; scripts/check_trivyignore.py enforces this in CI)
+vulnerabilities: []

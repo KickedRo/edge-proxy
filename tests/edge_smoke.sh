@@ -49,7 +49,11 @@ server {
 }
 CONF
 # 20 MB of random letters (base64 of random bytes, digits and symbols removed).
-head -c 20000000 /dev/urandom | base64 -w0 | tr -dc 'a-zA-Z' | head -c 20000000 > "$WORK/upload.txt" || true
+# Every stage reads its input to the end (no early-closing head in the pipe), so there is no SIGPIPE noise:
+# 20 MB of random bytes give about 21.7 MB of letters, which are then cut to 20 MB.
+head -c 20000000 /dev/urandom | base64 -w0 | tr -dc 'a-zA-Z' > "$WORK/upload.full"
+head -c 20000000 "$WORK/upload.full" > "$WORK/upload.txt"
+rm -f "$WORK/upload.full"
 [ "$(stat -c %s "$WORK/upload.txt")" -ge 20000000 ] || fail setup "could not generate the upload file"
 chmod 644 "$WORK/upload.txt"
 
