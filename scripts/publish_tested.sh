@@ -48,7 +48,7 @@ trap 'rm -rf "$WORK"' EXIT
 identity() {
   docker image inspect "$1" | jq -S --arg l "$KEY_LABEL" '.[0] | {
     Os, Architecture, Variant: (.Variant // ""),
-    DiffIDs: .RootFS.Layers,
+    # TEMPORARY MUTATION (reverted next commit): DiffIDs left out, the one-layer rehearsal case must catch it.
     Config: (.Config | .Labels = ((.Labels // {}) | del(.[$l])))}'
 }
 
