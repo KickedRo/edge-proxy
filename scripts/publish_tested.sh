@@ -12,7 +12,9 @@
 #     Prints "true" (publish) or "false" (skip); the reasons go to stderr. Publish when the :latest of any
 #     REPOSITORY does not carry KEY as its org.kickedro.build-key label (a missing or unreadable :latest counts as
 #     different), or WEEKDAY (ISO 8601, 1 = Monday, UTC) is 1 and FORCE_SKIP_CHECK is not true (weekly publish), or
-#     FORCE_PUBLISH is true.
+#     the :latest of any REPOSITORY was created more than 6 whole days ago (a missed weekly publish is made up the
+#     next day; counted in whole days so the run on the Sunday before the weekly publish does not publish as well),
+#     or FORCE_PUBLISH is true. PUBLISH_DECIDE_NOW (seconds since the epoch) replaces the current time, for tests.
 #
 #   scripts/publish_tested.sh push ARCHIVE TESTED_IDENTITY REPOSITORY KEY
 #     Publishes the tested image without rebuilding it. ARCHIVE is `docker save` of the tested image (an OCI image
@@ -50,29 +52,45 @@ identity() {
     Config: (.Config | .Labels = ((.Labels // {}) | del(.[$l])))}'
 }
 
-latest_key() { # REPOSITORY: the build key of REPOSITORY:latest, or nothing
+latest_info() { # REPOSITORY: "<build key> <created>" of REPOSITORY:latest ("-" for a missing field), or nothing
   local out
   if ! out=$(docker buildx imagetools inspect "$1:latest" --format '{{json .Image}}' 2>&1); then
     echo "$1:latest: not readable (${out//$'\n'/ })" >&2
     return 0
   fi
-  jq -r --arg l "$KEY_LABEL" '.config.Labels[$l] // empty' <<<"$out" 2>/dev/null || true
+  jq -r --arg l "$KEY_LABEL" '"\(.config.Labels[$l] // "-") \(.created // "-")"' <<<"$out" 2>/dev/null || true
 }
 
 decide() {
   [ $# -ge 5 ] || usage
-  local key=$1 weekday=$2 force_publish=$3 force_skip_check=$4 publish=false repo current
+  local key=$1 weekday=$2 force_publish=$3 force_skip_check=$4 publish=false repo current created created_s age_days
+  local now=${PUBLISH_DECIDE_NOW:-$(date -u +%s)}
   shift 4
   [[ $weekday =~ ^[1-7]$ ]] || die "WEEKDAY must be 1-7, got '$weekday'"
   [[ $force_publish =~ ^(true|false)$ && $force_skip_check =~ ^(true|false)$ ]] \
     || die "FORCE_PUBLISH and FORCE_SKIP_CHECK must be true or false"
+  [[ $now =~ ^[0-9]+$ ]] || die "PUBLISH_DECIDE_NOW must be seconds since the epoch, got '$now'"
   for repo in "$@"; do
-    current=$(latest_key "$repo")
+    current='' created=''
+    read -r current created <<<"$(latest_info "$repo")" || true
+    [ "$current" != - ] || current=''
     if [ "$current" = "$key" ]; then
       echo "unchanged: $repo:latest has this build's key $key" >&2
     else
       publish=true
       echo "changed: $repo:latest has build key '${current:-none}', this build $key" >&2
+    fi
+    if [ -n "$created" ]; then
+      if [ "$created" != - ] && created_s=$(date -u -d "$created" +%s 2>/dev/null); then
+        age_days=$(( (now - created_s) / 86400 ))
+        if [ "$age_days" -gt 6 ]; then
+          publish=true
+          echo "overdue: $repo:latest was created $age_days days ago (a weekly publish was missed)" >&2
+        fi
+      else
+        publish=true
+        echo "overdue: $repo:latest has no readable creation date ('$created')" >&2
+      fi
     fi
   done
   if [ "$weekday" = 1 ]; then
@@ -131,8 +149,9 @@ push() {
   [[ $key =~ ^sha256:[0-9a-f]{64}$ ]] || die "KEY must be sha256:<64 hex digits>"
   mkdir "$WORK/layout" "$WORK/context"
   tar -xf "$archive" -C "$WORK/layout"
-  [ -f "$WORK/layout/oci-layout" ] && [ -f "$WORK/layout/index.json" ] \
-    || die "$archive is not an OCI image layout (docker save of Docker 25 or later)"
+  if [ ! -f "$WORK/layout/oci-layout" ] || [ ! -f "$WORK/layout/index.json" ]; then
+    die "$archive is not an OCI image layout (docker save of Docker 25 or later)"
+  fi
   manifest=$(image_manifest "$WORK/layout")
   printf 'FROM tested\n' > "$WORK/context/Dockerfile"
   docker buildx build --progress plain \

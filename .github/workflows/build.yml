@@ -40,6 +40,10 @@ env:
   # because ghcr.io rate-limits anonymous DB downloads.
   TRIVY_IMAGE: ghcr.io/aquasecurity/trivy@sha256:8f6bb947dbc528902e11f2f5be52f7b519f6a39d5d148f41166f2040499768fb
   TRIVY_DB_REPOSITORY: public.ecr.aws/aquasecurity/trivy-db:2,ghcr.io/aquasecurity/trivy-db:2
+  # BuildKit for every buildx builder of this workflow (build-test, publish, and the publish rehearsal, which reads
+  # this variable): v0.35.0, pinned by digest instead of the floating buildx-stable-1 tag, because it holds the ghcr.io
+  # push credentials and writes the SBOM and provenance that get signed. Updated by hand (see the maintenance notes).
+  BUILDKIT_IMAGE: moby/buildkit:v0.35.0@sha256:aa632b921ef07411d2cb77292cd34213d4f7b384001d6fceef1e1f25bf9752bb
 
 jobs:
   # Looks up the newest upstream versions (nginx, ModSecurity, CRS, docker-gen, nginx-proxy pin) once; later
@@ -146,6 +150,8 @@ jobs:
           python3 scripts/check_trivyignore.py .trivyignore.yaml
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: image=${{ env.BUILDKIT_IMAGE }}
       - name: Build edge
         id: build-edge
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
@@ -288,7 +294,9 @@ jobs:
       # records repository, workflow, commit and run.
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
-          driver-opts: provenance-add-gha=false
+          driver-opts: |
+            image=${{ env.BUILDKIT_IMAGE }}
+            provenance-add-gha=false
       - name: Publish or skip
         id: decide
         env:
@@ -375,10 +383,14 @@ jobs:
             echo "- \`$GEN_REPOSITORY:$GEN_TAG\`, \`latest\`: \`$GEN_DIGEST\`"
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
-  # A failed scheduled run opens a "Build failed" issue (unless one is open); the next successful scheduled run
-  # closes it. Only fixed text and the run's URL go into the issue.
+  # A failed scheduled run opens a "Build failed" issue (unless the workflow already has one open); the next
+  # successful scheduled run closes it. A cancelled job counts as failed: that is how a job that hit its
+  # timeout-minutes ends, and a build that hangs every day must not go unnoticed. (A run superseded in the
+  # concurrency queue starts no job, so it never gets here.) Only issues opened by this workflow's token
+  # (github-actions[bot]) count, so an issue anyone can open with the same title does not mute the alarm. Only fixed
+  # text and the run's URL go into the issue.
   report:
-    needs: [resolve, build-test, publish]
+    needs: [resolve, build-test, publish, keepalive]
     if: always() && github.event_name == 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -393,18 +405,40 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           title="Build failed"
-          open=$(gh issue list --state open --limit 200 --json number,title \
+          open=$(gh issue list --state open --author 'github-actions[bot]' --limit 200 --json number,title \
             --jq ".[] | select(.title == \"$title\") | .number")
           echo "job results: $RESULTS; open issue: ${open:-none}"
           case " $RESULTS " in
-            *" failure "*)
+            *" failure "* | *" cancelled "*)
               if [ -z "$open" ]; then
                 gh issue create --title "$title" \
-                  --body "The scheduled build failed: $RUN_URL. It is closed by the next successful scheduled build."
+                  --body "The scheduled build failed or timed out: $RUN_URL. It is closed by the next successful scheduled build."
               fi ;;
-            *" cancelled "*) ;;
             *)
               for n in $open; do
                 gh issue close "$n" --comment "The scheduled build passed again: $RUN_URL"
               done ;;
           esac
+
+  # Keep-alive (scheduled runs only): GitHub disables the scheduled workflows of a public repository after 60 days
+  # without repository activity, which would stop the daily build and its own freshness alarm together, silently.
+  # This re-enables both workflows on every scheduled run. GitHub does not document whether enabling an enabled
+  # workflow resets the 60-day timer; it is the mechanism keep-alive tools use, and external monitoring of the
+  # published images is the backstop (both described in the maintenance docs). No commits are made (main is
+  # protected). A failing call fails this job, and the report job turns that into a "Build failed" issue.
+  keepalive:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write # PUT /repos/{owner}/{repo}/actions/workflows/{id}/enable
+    steps:
+      - name: Re-enable the scheduled workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          for workflow in build.yml freshness.yml; do
+            gh api --method PUT "repos/$GH_REPO/actions/workflows/$workflow/enable"
+            echo "enabled: $workflow"
+          done

@@ -58,7 +58,9 @@ jobs:
           python3 scripts/check_freshness.py --resolved "$RUNNER_TEMP/versions.env" --max-age-days "${MAX_AGE_DAYS:-8}" \
             "edge=$RUNNER_TEMP/edge-proxy.json" "gen=$RUNNER_TEMP/edge-proxy-gen.json" | tee -a "$GITHUB_STEP_SUMMARY"
 
-  # Only fixed text and the run's URL go into the issue.
+  # Any result of the check other than success opens the issue: a failure, and also a cancellation (how a job that
+  # hit its timeout-minutes ends). Only issues opened by this workflow's token (github-actions[bot]) count, so an issue
+  # anyone can open with the same title does not mute the alarm. Only fixed text and the run's URL go into the issue.
   report:
     needs: check
     if: always()
@@ -75,17 +77,37 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           title="Image stale or behind upstream"
-          open=$(gh issue list --state open --limit 200 --json number,title \
+          open=$(gh issue list --state open --author 'github-actions[bot]' --limit 200 --json number,title \
             --jq ".[] | select(.title == \"$title\") | .number")
           echo "check: $RESULT; open issue: ${open:-none}"
-          case "$RESULT" in
-            failure)
-              if [ -z "$open" ]; then
-                gh issue create --title "$title" \
-                  --body "The freshness check failed: $RUN_URL. It is closed by the next passing check."
-              fi ;;
-            success)
-              for n in $open; do
-                gh issue close "$n" --comment "The freshness check passed again: $RUN_URL"
-              done ;;
-          esac
+          if [ "$RESULT" = success ]; then
+            for n in $open; do
+              gh issue close "$n" --comment "The freshness check passed again: $RUN_URL"
+            done
+          elif [ -z "$open" ]; then
+            gh issue create --title "$title" \
+              --body "The freshness check did not pass ($RESULT): $RUN_URL. It is closed by the next passing check."
+          fi
+
+  # Keep-alive (scheduled runs only): GitHub disables the scheduled workflows of a public repository after 60 days
+  # without repository activity, which would stop the daily build and this alarm together, silently. This re-enables
+  # both workflows on every scheduled run (build.yml does the same). GitHub does not document whether enabling an
+  # enabled workflow resets the 60-day timer; it is the mechanism keep-alive tools use, and external monitoring of the
+  # published images is the backstop (both described in the maintenance docs). No commits are made (main is
+  # protected). A failing call fails this job, so the run shows as failed.
+  keepalive:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write # PUT /repos/{owner}/{repo}/actions/workflows/{id}/enable
+    steps:
+      - name: Re-enable the scheduled workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          for workflow in build.yml freshness.yml; do
+            gh api --method PUT "repos/$GH_REPO/actions/workflows/$workflow/enable"
+            echo "enabled: $workflow"
+          done
