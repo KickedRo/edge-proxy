@@ -12,9 +12,24 @@ on:
         description: "Override SECURITY_EPOCH (default: today's UTC date, YYYYMMDD). A new value re-runs the image security-upgrade layers."
         required: false
         type: string
+      force_publish:
+        description: "Publish even if the build key equals the one of :latest (on main only)."
+        required: false
+        default: false
+        type: boolean
+      force_skip_check:
+        description: "Treat today as not Monday: no weekly publish, only a changed build key publishes."
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
+
+# bash -eo pipefail for every run step (the implicit default shell has no pipefail).
+defaults:
+  run:
+    shell: bash
 
 concurrency:
   group: build-${{ github.workflow }}-${{ github.ref }}
@@ -25,6 +40,11 @@ env:
   # because ghcr.io rate-limits anonymous DB downloads.
   TRIVY_IMAGE: ghcr.io/aquasecurity/trivy@sha256:8f6bb947dbc528902e11f2f5be52f7b519f6a39d5d148f41166f2040499768fb
   TRIVY_DB_REPOSITORY: public.ecr.aws/aquasecurity/trivy-db:2,ghcr.io/aquasecurity/trivy-db:2
+  # BuildKit for every buildx builder of this workflow (build-test, publish, and the publish rehearsal, which reads
+  # this variable): v0.34.2, the release Docker's buildx-stable-1 channel points to (on 2026-11-13), pinned by digest
+  # instead of following that floating tag, because it holds the ghcr.io push credentials and writes the SBOM and
+  # provenance that get signed. Updated by hand to what buildx-stable-1 resolves to (see the maintenance notes).
+  BUILDKIT_IMAGE: moby/buildkit:v0.34.2@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe
 
 jobs:
   # Looks up the newest upstream versions (nginx, ModSecurity, CRS, docker-gen, nginx-proxy pin) once; later
@@ -33,7 +53,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
-      epoch: ${{ steps.epoch.outputs.epoch }}
+      epoch: ${{ steps.date.outputs.epoch }}
+      weekday: ${{ steps.date.outputs.weekday }}
+      edge_tag: ${{ steps.date.outputs.edge_tag }}
+      gen_tag: ${{ steps.date.outputs.gen_tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -42,27 +65,45 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python3 scripts/resolve_versions.py --out versions.env && cat versions.env
-      # SECURITY_EPOCH: build argument consumed only by the security-upgrade layers of the images (apt upgrade,
-      # docker-gen's vulnerability-driven module upgrades), so they re-run once a day while the expensive layers
-      # (the ModSecurity compile) stay cached. Computed once here so both builds of a run agree.
-      - name: Security epoch
-        id: epoch
+      # The UTC date, taken once so every job of the run agrees. SECURITY_EPOCH: build argument consumed only by
+      # the security-upgrade layers of the images (apt upgrade, docker-gen's vulnerability-driven module upgrades),
+      # so they re-run once a day while the expensive layers (the ModSecurity compile) stay cached. The weekday
+      # (1 = Monday) drives the weekly publish; the tags are the release tags of a publish.
+      - name: Date, security epoch and release tags
+        id: date
         env:
           OVERRIDE: ${{ inputs.security_epoch }}
         run: |
-          epoch="${OVERRIDE:-$(date -u +%Y%m%d)}"
+          today=$(date -u +%Y%m%d)
+          epoch="${OVERRIDE:-$today}"
           case "$epoch" in *[!A-Za-z0-9._-]* | "") echo "bad security epoch" >&2; exit 1 ;; esac
-          echo "epoch=$epoch" >> "$GITHUB_OUTPUT"
+          get() { sed -n "s/^$1=//p" versions.env; }
+          edge_tag="$(get NGINX_VERSION)-modsec$(get MODSECURITY_VERSION | sed 's/^v//')-crs$(get CRS_VERSION | sed 's/^v//')-$today"
+          gen_tag="$(get DOCKER_GEN_VERSION | sed 's/^v//')-np$(get NGINX_PROXY_REF | cut -c1-12)-$today"
+          for tag in "$edge_tag" "$gen_tag"; do
+            [[ $tag =~ ^[0-9][A-Za-z0-9_.-]{0,127}$ ]] || { echo "bad release tag: $tag" >&2; exit 1; }
+          done
+          {
+            echo "epoch=$epoch"
+            echo "weekday=$(date -u +%u)"
+            echo "edge_tag=$edge_tag"
+            echo "gen_tag=$gen_tag"
+          } | tee -a "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: versions
           path: versions.env
           if-no-files-found: error
 
+  # Builds both images, tests and scans them, computes the content build key and rehearses publishing against a
+  # local registry. On main (not for pull requests) the tested images go to the publish job as an artifact.
   build-test:
     needs: resolve
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    outputs:
+      key: ${{ steps.key.outputs.key }}
+      sums: ${{ steps.tested.outputs.sums }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -70,11 +111,23 @@ jobs:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: versions
-      - name: Build arguments from the resolved versions
+      - name: Build arguments and labels from the resolved versions
         id: args
         env:
           EPOCH: ${{ needs.resolve.outputs.epoch }}
+          EDGE_TAG: ${{ needs.resolve.outputs.edge_tag }}
+          GEN_TAG: ${{ needs.resolve.outputs.gen_tag }}
+          SOURCE: ${{ github.server_url }}/${{ github.repository }}
+          REVISION: ${{ github.sha }}
         run: |
+          versions=$(paste -sd';' versions.env)
+          labels() { # VERSION LICENSES
+            echo "org.opencontainers.image.source=$SOURCE"
+            echo "org.opencontainers.image.revision=$REVISION"
+            echo "org.opencontainers.image.version=$1"
+            echo "org.opencontainers.image.licenses=$2"
+            echo "org.kickedro.versions=$versions"
+          }
           {
             echo 'edge<<EOF'
             grep -E '^(NGINX_VERSION|MODSECURITY_VERSION|MODSECURITY_NGINX_VERSION|CRS_VERSION|NGINX_PROXY_REF)=' versions.env
@@ -84,6 +137,12 @@ jobs:
             grep -E '^(GO_VERSION|DOCKER_GEN_VERSION|NGINX_PROXY_REF)=' versions.env
             echo "SECURITY_EPOCH=$EPOCH"
             echo 'EOF'
+            echo 'edge_labels<<EOF'
+            labels "$EDGE_TAG" "MIT AND BSD-2-Clause AND Apache-2.0"
+            echo 'EOF'
+            echo 'gen_labels<<EOF'
+            labels "$GEN_TAG" "MIT"
+            echo 'EOF'
           } >> "$GITHUB_OUTPUT"
 
       - name: Unit tests and ignore-file check
@@ -92,22 +151,28 @@ jobs:
           python3 scripts/check_trivyignore.py .trivyignore.yaml
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: image=${{ env.BUILDKIT_IMAGE }}
       - name: Build edge
+        id: build-edge
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: edge
           load: true
           tags: edge-proxy:ci
           build-args: ${{ steps.args.outputs.edge }}
+          labels: ${{ steps.args.outputs.edge_labels }}
           cache-from: type=gha,scope=edge
           cache-to: type=gha,scope=edge,mode=max
       - name: Build gen
+        id: build-gen
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: gen
           load: true
           tags: edge-proxy-gen:ci
           build-args: ${{ steps.args.outputs.gen }}
+          labels: ${{ steps.args.outputs.gen_labels }}
           cache-from: type=gha,scope=gen
           cache-to: type=gha,scope=gen,mode=max
 
@@ -119,7 +184,7 @@ jobs:
         run: tests/hardening_smoke.sh edge-proxy:ci
 
       # Fails on any fixable HIGH or CRITICAL finding that .trivyignore.yaml does not list. Scans the saved
-      # image archives, so Trivy needs no access to the Docker socket.
+      # image archives, so Trivy needs no access to the Docker socket. These archives are what gets published.
       - name: Trivy scan
         run: |
           mkdir "$RUNNER_TEMP/scan"
@@ -139,3 +204,242 @@ jobs:
             echo "::endgroup::"
           done
           exit "$status"
+
+      # The content build key (scripts/build_key.sh): what is in the images, stable from day to day while nothing
+      # meaningful changed. The publish job compares it with the key of the published :latest. Of the builds'
+      # metadata only the provenance materials (base images and downloads with digests) are passed on: the rest
+      # holds the whole GitHub event payload, which would flood the log.
+      - name: Build key
+        id: key
+        env:
+          EDGE_MATERIALS: ${{ toJSON(fromJSON(steps.build-edge.outputs.metadata)['buildx.build.provenance'].materials) }}
+          GEN_MATERIALS: ${{ toJSON(fromJSON(steps.build-gen.outputs.metadata)['buildx.build.provenance'].materials) }}
+        run: |
+          jq -n --argjson m "$EDGE_MATERIALS" '{"buildx.build.provenance": {materials: $m}}' > "$RUNNER_TEMP/edge-metadata.json"
+          jq -n --argjson m "$GEN_MATERIALS" '{"buildx.build.provenance": {materials: $m}}' > "$RUNNER_TEMP/gen-metadata.json"
+          key=$(BUILD_KEY_INPUTS="$RUNNER_TEMP/build-key-inputs.txt" scripts/build_key.sh versions.env \
+            edge-proxy:ci "$RUNNER_TEMP/edge-metadata.json" edge-proxy-gen:ci "$RUNNER_TEMP/gen-metadata.json")
+          echo "::group::build key inputs"
+          cat "$RUNNER_TEMP/build-key-inputs.txt"
+          echo "::endgroup::"
+          echo "build key: $key"
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+      - name: Build key test
+        run: |
+          tests/build_key_test.sh versions.env edge-proxy:ci "$RUNNER_TEMP/edge-metadata.json" \
+            edge-proxy-gen:ci "$RUNNER_TEMP/gen-metadata.json"
+
+      # What was tested: the archives Trivy scanned and the identity (layer diff IDs + configuration) of the images
+      # the smoke tests ran. The publish job pushes these archives and checks the pushed images against these
+      # identities (scripts/publish_tested.sh).
+      - name: Record the tested images
+        id: tested
+        run: |
+          mkdir "$RUNNER_TEMP/tested"
+          mv "$RUNNER_TEMP/scan/edge.tar" "$RUNNER_TEMP/scan/gen.tar" "$RUNNER_TEMP/tested/"
+          scripts/publish_tested.sh identity edge-proxy:ci > "$RUNNER_TEMP/tested/edge.json"
+          scripts/publish_tested.sh identity edge-proxy-gen:ci > "$RUNNER_TEMP/tested/gen.json"
+          cd "$RUNNER_TEMP/tested"
+          sha256sum edge.tar gen.tar edge.json gen.json | tee "$RUNNER_TEMP/SHA256SUMS"
+          {
+            echo 'sums<<EOF'
+            cat "$RUNNER_TEMP/SHA256SUMS"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+      - name: Rehearse publishing (local registry, nothing leaves the runner)
+        env:
+          KEY: ${{ steps.key.outputs.key }}
+        run: |
+          t="$RUNNER_TEMP/tested"
+          tests/publish_rehearsal.sh "$t/edge.tar" "$t/edge.json" "$t/gen.tar" "$t/gen.json" "$KEY"
+      - name: Hand the tested images to the publish job
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: tested-images
+          path: |
+            ${{ runner.temp }}/tested/edge.tar
+            ${{ runner.temp }}/tested/gen.tar
+            ${{ runner.temp }}/tested/edge.json
+            ${{ runner.temp }}/tested/gen.json
+          if-no-files-found: error
+          retention-days: 1
+
+  # Publishes the tested images, unchanged, when their content differs from :latest (build key), on Mondays, or on
+  # request. Only on main, never for pull requests, and only after build-test passed (smoke tests, Trivy gate).
+  publish:
+    needs: [resolve, build-test]
+    if: success() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read # checkout
+      packages: write # read :latest's build key, push to ghcr.io, store signature and attestation there
+      id-token: write # GitHub OIDC token for keyless cosign signing and the provenance attestation
+      attestations: write # store the provenance attestation on GitHub
+    env:
+      EDGE_REPOSITORY: ghcr.io/kickedro/edge-proxy
+      GEN_REPOSITORY: ghcr.io/kickedro/edge-proxy-gen
+      KEY: ${{ needs.build-test.outputs.key }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Log in to ghcr.io
+        env:
+          TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+        run: printf '%s' "$TOKEN" | docker login ghcr.io --username "$ACTOR" --password-stdin
+      # provenance-add-gha=false: buildx's provenance on the published images (public, permanent) leaves out the
+      # GitHub event payload (triggering account, commit authors); GitHub's signed provenance attestation below
+      # records repository, workflow, commit and run.
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: |
+            image=${{ env.BUILDKIT_IMAGE }}
+            provenance-add-gha=false
+      - name: Publish or skip
+        id: decide
+        env:
+          WEEKDAY: ${{ needs.resolve.outputs.weekday }}
+          FORCE_PUBLISH: ${{ inputs.force_publish == true }}
+          FORCE_SKIP_CHECK: ${{ inputs.force_skip_check == true }}
+        run: |
+          publish=$(scripts/publish_tested.sh decide "$KEY" "$WEEKDAY" "$FORCE_PUBLISH" "$FORCE_SKIP_CHECK" \
+            "$EDGE_REPOSITORY" "$GEN_REPOSITORY")
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          if [ "$publish" = false ]; then
+            echo "unchanged, skipped" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - if: steps.decide.outputs.publish == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: tested-images
+          path: ${{ runner.temp }}/tested
+      - name: Check the artifact is what build-test tested
+        if: steps.decide.outputs.publish == 'true'
+        env:
+          SUMS: ${{ needs.build-test.outputs.sums }}
+        run: |
+          cd "$RUNNER_TEMP/tested"
+          printf '%s\n' "$SUMS" > "$RUNNER_TEMP/SHA256SUMS"
+          [ "$(wc -l < "$RUNNER_TEMP/SHA256SUMS")" = 4 ] || { echo "expected 4 checksums from build-test" >&2; exit 1; }
+          sha256sum --strict -c "$RUNNER_TEMP/SHA256SUMS"
+      - name: Push by digest, with SBOM and provenance; same-bits check
+        id: push
+        if: steps.decide.outputs.publish == 'true'
+        env:
+          PROVENANCE_BUILDER_ID: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          t="$RUNNER_TEMP/tested"
+          edge=$(scripts/publish_tested.sh push "$t/edge.tar" "$t/edge.json" "$EDGE_REPOSITORY" "$KEY")
+          gen=$(scripts/publish_tested.sh push "$t/gen.tar" "$t/gen.json" "$GEN_REPOSITORY" "$KEY")
+          echo "edge=$edge" >> "$GITHUB_OUTPUT"
+          echo "gen=$gen" >> "$GITHUB_OUTPUT"
+      - if: steps.decide.outputs.publish == 'true'
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        with:
+          cosign-release: v3.1.4
+      - name: Sign (keyless, GitHub OIDC)
+        if: steps.decide.outputs.publish == 'true'
+        env:
+          EDGE_DIGEST: ${{ steps.push.outputs.edge }}
+          GEN_DIGEST: ${{ steps.push.outputs.gen }}
+        run: |
+          cosign sign --yes "$EDGE_REPOSITORY@$EDGE_DIGEST"
+          cosign sign --yes "$GEN_REPOSITORY@$GEN_DIGEST"
+      - name: Provenance attestation (edge)
+        if: steps.decide.outputs.publish == 'true'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.EDGE_REPOSITORY }}
+          subject-digest: ${{ steps.push.outputs.edge }}
+          push-to-registry: true
+          # Storage records (the organization's "Linked Artifacts" page) would need artifact-metadata: write.
+          create-storage-record: false
+      - name: Provenance attestation (gen)
+        if: steps.decide.outputs.publish == 'true'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.GEN_REPOSITORY }}
+          subject-digest: ${{ steps.push.outputs.gen }}
+          push-to-registry: true
+          # Storage records (the organization's "Linked Artifacts" page) would need artifact-metadata: write.
+          create-storage-record: false
+      # Tags last: :latest moves only to images that passed the same-bits check and are signed and attested.
+      - name: Tag
+        if: steps.decide.outputs.publish == 'true'
+        env:
+          EDGE_DIGEST: ${{ steps.push.outputs.edge }}
+          GEN_DIGEST: ${{ steps.push.outputs.gen }}
+          EDGE_TAG: ${{ needs.resolve.outputs.edge_tag }}
+          GEN_TAG: ${{ needs.resolve.outputs.gen_tag }}
+        run: |
+          scripts/publish_tested.sh tag "$EDGE_REPOSITORY" "$EDGE_DIGEST" "$EDGE_TAG" latest
+          scripts/publish_tested.sh tag "$GEN_REPOSITORY" "$GEN_DIGEST" "$GEN_TAG" latest
+          {
+            echo "published (build key \`$KEY\`):"
+            echo "- \`$EDGE_REPOSITORY:$EDGE_TAG\`, \`latest\`: \`$EDGE_DIGEST\`"
+            echo "- \`$GEN_REPOSITORY:$GEN_TAG\`, \`latest\`: \`$GEN_DIGEST\`"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # A failed scheduled run opens a "Build failed" issue (unless the workflow already has one open); the next
+  # successful scheduled run closes it. A cancelled job counts as failed: that is how a job that hit its
+  # timeout-minutes ends, and a build that hangs every day must not go unnoticed. (A run superseded in the
+  # concurrency queue starts no job, so it never gets here.) Only issues opened by this workflow's token
+  # (github-actions[bot]) count, so an issue anyone can open with the same title does not mute the alarm. Only fixed
+  # text and the run's URL go into the issue.
+  report:
+    needs: [resolve, build-test, publish, keepalive]
+    if: always() && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write # open and close the "Build failed" issue
+    steps:
+      - name: Open or close the "Build failed" issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Build failed"
+          open=$(gh issue list --state open --author 'github-actions[bot]' --limit 200 --json number,title \
+            --jq ".[] | select(.title == \"$title\") | .number")
+          echo "job results: $RESULTS; open issue: ${open:-none}"
+          case " $RESULTS " in
+            *" failure "* | *" cancelled "*)
+              if [ -z "$open" ]; then
+                gh issue create --title "$title" \
+                  --body "The scheduled build failed or timed out: $RUN_URL. It is closed by the next successful scheduled build."
+              fi ;;
+            *)
+              for n in $open; do
+                gh issue close "$n" --comment "The scheduled build passed again: $RUN_URL"
+              done ;;
+          esac
+
+  # Keep-alive (scheduled runs only): GitHub disables the scheduled workflows of a public repository after 60 days
+  # without repository activity, which would stop the daily build and its own freshness alarm together, silently.
+  # This re-enables both workflows on every scheduled run. GitHub does not document whether enabling an enabled
+  # workflow resets the 60-day timer; it is the mechanism keep-alive tools use, and external monitoring of the
+  # published images is the backstop (both described in the maintenance docs). No commits are made (main is
+  # protected). A failing call fails this job, and the report job turns that into a "Build failed" issue.
+  keepalive:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write # PUT /repos/{owner}/{repo}/actions/workflows/{id}/enable
+    steps:
+      - name: Re-enable the scheduled workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          for workflow in build.yml freshness.yml; do
+            gh api --method PUT "repos/$GH_REPO/actions/workflows/$workflow/enable"
+            echo "enabled: $workflow"
+          done
