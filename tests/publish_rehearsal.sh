@@ -14,7 +14,7 @@ set -euo pipefail
 EDGE_ARCHIVE=$1 EDGE_ID=$2 GEN_ARCHIVE=$3 GEN_ID=$4 KEY=$5
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 P="$ROOT/scripts/publish_tested.sh"
-# Distribution registry 3.0.0, pinned by digest.
+# Distribution registry 3.1.2 (the registry:3 tag on 2026-11-13), pinned by digest.
 REGISTRY_IMAGE=registry@sha256:82f6ff4a7f982960c8aa51617fea3aabc485df6e55cce80d22deb1de36f1bc3c
 OTHER_KEY=sha256:$(printf '%064d' 0)
 
