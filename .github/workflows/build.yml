@@ -41,9 +41,10 @@ env:
   TRIVY_IMAGE: ghcr.io/aquasecurity/trivy@sha256:8f6bb947dbc528902e11f2f5be52f7b519f6a39d5d148f41166f2040499768fb
   TRIVY_DB_REPOSITORY: public.ecr.aws/aquasecurity/trivy-db:2,ghcr.io/aquasecurity/trivy-db:2
   # BuildKit for every buildx builder of this workflow (build-test, publish, and the publish rehearsal, which reads
-  # this variable): v0.35.0, pinned by digest instead of the floating buildx-stable-1 tag, because it holds the ghcr.io
-  # push credentials and writes the SBOM and provenance that get signed. Updated by hand (see the maintenance notes).
-  BUILDKIT_IMAGE: moby/buildkit:v0.35.0@sha256:aa632b921ef07411d2cb77292cd34213d4f7b384001d6fceef1e1f25bf9752bb
+  # this variable): v0.34.2, the release Docker's buildx-stable-1 channel points to (on 2026-11-13), pinned by digest
+  # instead of following that floating tag, because it holds the ghcr.io push credentials and writes the SBOM and
+  # provenance that get signed. Updated by hand to what buildx-stable-1 resolves to (see the maintenance notes).
+  BUILDKIT_IMAGE: moby/buildkit:v0.34.2@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe
 
 jobs:
   # Looks up the newest upstream versions (nginx, ModSecurity, CRS, docker-gen, nginx-proxy pin) once; later
