@@ -427,8 +427,7 @@ jobs:
   # published images is the backstop (both described in the maintenance docs). No commits are made (main is
   # protected). A failing call fails this job, and the report job turns that into a "Build failed" issue.
   keepalive:
-    # TEMPORARY (reverted next commit): also on pull_request, to prove the enable call works with GITHUB_TOKEN.
-    if: github.event_name == 'schedule' || github.event_name == 'pull_request'
+    if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -439,7 +438,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          for workflow in build.yml; do   # TEMPORARY: freshness.yml is not registered before the merge
+          for workflow in build.yml freshness.yml; do
             gh api --method PUT "repos/$GH_REPO/actions/workflows/$workflow/enable"
             echo "enabled: $workflow"
           done
