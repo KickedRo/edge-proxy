@@ -1,11 +1,68 @@
 # edge-proxy
 
-Two container images for the nginx-proxy "separate containers" layout:
+Two container images for the front door of a Docker host: a hardened nginx with a web application firewall, and the
+config generator that goes with it. They are a drop-in for the "separate containers" layout of
+[nginx-proxy](https://github.com/nginx-proxy/nginx-proxy): your backends keep their `VIRTUAL_HOST` variables and
+nothing else changes.
 
-- `edge`: current nginx mainline + ModSecurity v3 + OWASP Core Rule Set 4,
-  hardened by default, every setting one environment variable.
-- `gen`: docker-gen plus nginx-proxy's template, pinned and rebuilt automatically.
+**Start here: the [settings table](docs/settings.md)**, every setting of the `edge` image with its default and what
+you lose by weakening it.
 
-Status: work in progress, private. Not ready for use.
+| Image | What it is |
+|---|---|
+| `ghcr.io/kickedro/edge-proxy` (`edge`) | Current nginx mainline, ModSecurity v3 and the OWASP Core Rule Set 4. Hardened by default; every protection is one documented environment variable. |
+| `ghcr.io/kickedro/edge-proxy-gen` (`gen`) | [docker-gen](https://github.com/nginx-proxy/docker-gen) built from source, with nginx-proxy's own template at a pinned commit. It watches Docker and writes the nginx configuration for `edge`. |
 
-Licence: MIT, see LICENSE and NOTICE.
+## Why not the upstream nginx-proxy image
+
+- **Freshness.** Both images are rebuilt every day against the newest nginx, ModSecurity, CRS and docker-gen, with
+  the Debian security updates. A changed build is tested, scanned and published; an unchanged one is not. A
+  published `latest` is never older than about a week, and an alarm opens an issue if it is.
+- **A WAF in front of every site.** Requests are inspected by the OWASP Core Rule Set (paranoia level 1, blocking
+  from the first request). Upstream nginx-proxy has no WAF.
+- **Hardened defaults.** Short client timeouts, no version in the `Server` header, backend software headers
+  removed, security headers added, a block page that carries a reference to the audit log entry. The start-up check
+  prints a `SECURITY:` line for every setting you weaken and refuses values it does not understand.
+- **Verifiable.** Images are signed and come with build provenance and an SBOM, see [docs/verify.md](docs/verify.md).
+
+The upstream template is used unchanged, so what works with nginx-proxy's separate-containers layout works here. One
+difference to know about: the hardened defaults replace some proxy-wide `conf.d` settings, see
+[migrating](docs/configuration.md#migrating-from-an-existing-nginx-proxy-setup).
+
+## Quick start
+
+[`examples/docker-compose.yml`](examples/docker-compose.yml) is the whole layout: `edge`, `gen`, the
+[acme-companion](https://github.com/nginx-proxy/acme-companion) for Let's Encrypt certificates, and a test backend.
+Copy it, change the example host names and the e-mail address, then:
+
+```sh
+docker compose up -d
+```
+
+Backends join the same network and set `VIRTUAL_HOST` (and `LETSENCRYPT_HOST` for a certificate) as they would with
+nginx-proxy. Look at the start-up output of `edge`: it shows any `SECURITY:` line.
+
+Before you use it for real, read the [configuration guide](docs/configuration.md). The points that most often
+matter: the audit log (it holds request headers, treat it as sensitive), `curl` uploads that send
+`Expect: 100-continue` (blocked by default), and how to add site-specific WAF exclusions.
+
+## Documentation
+
+- [docs/settings.md](docs/settings.md): every environment variable (generated from `edge/settings.tsv`).
+- [docs/configuration.md](docs/configuration.md): mount points, exclusions, logs, block page, migrating, the `gen` image.
+- [docs/verify.md](docs/verify.md): check signatures and provenance, pin by digest.
+- [examples/](examples/): the compose file and how to write exclusions.
+- [docs/maintenance.md](docs/maintenance.md): how the build pipeline works (for maintainers).
+- [docs/going-public.md](docs/going-public.md): the repository protections that are switched on.
+- [SECURITY.md](SECURITY.md): how to report a vulnerability.
+
+## Status
+
+Maintained by KickedRo for its own use and published in case it helps others. There is no support promise: issues
+and pull requests are welcome, but they are handled when time allows, and changes that do not fit our own needs may
+be declined.
+
+## Licence
+
+MIT, see [LICENSE](LICENSE). The images contain third-party software under its own licences, see
+[NOTICE](NOTICE).
