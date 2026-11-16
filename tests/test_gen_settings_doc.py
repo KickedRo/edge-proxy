@@ -16,6 +16,7 @@ ROWS = [
     ("ALPHA_MODE", "on", "on|off", "off", "Alpha protection is lost.", "Turns alpha on.", "When alpha breaks a client."),
     ("BETA_LIMIT", "5", "<integer>", ">5", "More beta gets through.", "Limits beta.", "For sites with much beta."),
     ("GAMMA_STATUS", "403", "403|406", "-", "No security effect.", "Status for gamma.", "To match a client."),
+    ("DELTA_LIST", "|a/b| |c/d|", "<content-types>", "+", "More delta is accepted.", "Lists delta.", "For delta."),
 ]
 FIXTURE = "# A comment line, then an empty line.\n\n" + "".join("\t".join(r) + "\n" for r in ROWS)
 
@@ -42,11 +43,14 @@ class GenSettingsDoc(unittest.TestCase):
         self.assertEqual(len(body), len(ROWS), r.stdout)
         for (var, default, _allowed, _weaker, risk, what, when), line in zip(ROWS, body):
             for text in (var, default, risk, what, when):
-                self.assertIn(text, line)
+                self.assertIn(text.replace("|", "\\|"), line)  # a | in a cell is escaped
         # The weakening rule and the allowed values are shown too.
         self.assertIn("`off`", body[0])
         self.assertIn("above `5`", body[1])
         self.assertIn("`406`", body[2])
+        self.assertIn("any item that the default does not have", body[3])
+        # A | in a value is escaped, so it does not end the table cell.
+        self.assertIn("`\\|a/b\\| \\|c/d\\|`", body[3])
 
     def test_missing_risk_text_fails(self):
         r = run(FIXTURE.replace("More beta gets through.", ""))

@@ -10,10 +10,11 @@ their defaults and what you lose by weakening them, see the **[settings table](s
   and linking to the settings table. Check `docker logs` after changing a setting.
 
 Contents: [Mount points](#mount-points-for-your-own-rules-and-config) ·
-[ACME exemption](#the-acme-challenge-exemption) · [Expect: 100-continue](#expect-100-continue-is-blocked) ·
-[Audit log](#audit-log) · [Block page](#block-page) · [Headers](#security-headers-and-hidden-backend-headers) ·
-[Migrating](#migrating-from-an-existing-nginx-proxy-setup) · [Read-only filesystem](#read-only-root-filesystem) ·
-[The gen image](#the-gen-image)
+[ACME exemption](#the-acme-challenge-exemption) · [First-use false positives](#first-use-false-positives) ·
+[Expect: 100-continue](#expect-100-continue-is-blocked) · [Audit log](#audit-log) · [Block page](#block-page) ·
+[Headers](#security-headers-and-hidden-backend-headers) · [Proxy-wide files](#proxy-wide-files-in-confd) ·
+[A replaced nginx.conf](#a-replaced-nginxconf) · [Migrating](#migrating-from-an-existing-nginx-proxy-setup) ·
+[Read-only filesystem](#read-only-root-filesystem) · [The gen image](#the-gen-image)
 
 ## Mount points for your own rules and config
 
@@ -21,13 +22,15 @@ Contents: [Mount points](#mount-points-for-your-own-rules-and-config) ·
 |---|---|
 | `/etc/nginx/modsec/custom.d/` | Your ModSecurity files (`*.conf`), loaded **before** the Core Rule Set. For exclusions that must be in place before a rule runs, and for your own rules. |
 | `/etc/nginx/modsec/after.d/` | Your ModSecurity files (`*.conf`), loaded **after** the Core Rule Set. For things that must come after the rules exist, such as `SecRuleRemoveById` or response exclusions. |
+| `/etc/nginx/modsec/plugins/` | [CRS plugins](#crs-plugins): the files of a plugin's `plugins/` directory, loaded in the CRS's order. |
 | `/etc/nginx/kickedro/block-page.html` | Your own [block page](#block-page). |
 | `/etc/nginx/templates/` | The official nginx image's template mechanism (`*.template` files, rendered at start) is still in the image, but **in the split layout it does nothing useful**: `nginx.conf` includes only `conf.d/*.conf` at http level and `toplevel.conf.d/*.conf` at main level, and `conf.d` belongs to `gen` and is read-only on `edge`. For your own nginx settings use nginx-proxy's `vhost.d` snippets, or a file in the `conf.d` volume that `gen` mounts writable. |
 
-Both ModSecurity directories may be empty or not mounted at all. The image's own settings are rendered at start from
-its own templates (kept apart from `/etc/nginx/templates`) and loaded in this order: ModSecurity's fixed settings, the
-CRS setup, the settings from the environment variables, the [ACME exemption](#the-acme-challenge-exemption),
-`custom.d`, the CRS rules, the status setting that needs the rules, `after.d`.
+The three ModSecurity directories may be empty or not mounted at all. The image's own settings are rendered at start
+from its own templates (kept apart from `/etc/nginx/templates`) and loaded in this order: ModSecurity's fixed
+settings, the CRS setup, the settings from the environment variables, the [ACME exemption](#the-acme-challenge-exemption),
+the plugins' `*-config.conf` and `*-before.conf`, `custom.d`, the CRS rules, the plugins' `*-after.conf`, the status
+setting that needs the rules, `after.d`.
 
 Use rule IDs from 10100 to 99999 for your own rules (10001 is the image's ACME exemption; the CRS uses 900000 and up).
 The files must be readable by the `nginx` user. A ModSecurity syntax error in a file stops nginx from starting, and
@@ -74,6 +77,79 @@ To remove the exemption (for example when you use DNS validation only), mount a 
 ```
 SecRuleRemoveById 10001
 ```
+
+## First-use false positives
+
+With the WAF on (`MODSEC_RULE_ENGINE=On`, the default), the OWASP CRS's default policy and ModSecurity's body limits
+refuse some legitimate requests out of the box. These are the usual ones; each has a setting or a small file. They get
+the deny status and the [block page](#block-page), whose reference finds the audit entry, which names the rule.
+
+| Refused | Rule | Typical clients | What to do |
+|---|---|---|---|
+| Methods other than `GET`, `HEAD`, `POST` and `OPTIONS` | 911100 | REST APIs and single-page applications (`PUT`, `PATCH`, `DELETE`); WebDAV, CalDAV and Nextcloud (`PROPFIND`, `MKCOL`, ...) | [`MODSEC_ALLOWED_METHODS`](settings.md#modsec_allowed_methods), or for one site the snippet below |
+| Request bodies of other types than forms, multipart, XML and JSON | 920420 | `application/octet-stream` uploads (WebDAV, file sync, container registries) | [`MODSEC_ALLOWED_REQUEST_CONTENT_TYPE`](settings.md#modsec_allowed_request_content_type) |
+| Method-override headers (`X-HTTP-Method-Override` and two others) | 920450 | WordPress's block editor: it sends updates and deletes as `POST` with `X-HTTP-Method-Override` | the snippet below |
+| `Expect: 100-continue` | 920450 | `curl` and some API clients | see [below](#expect-100-continue-is-blocked) |
+| Form, JSON or XML bodies over 128 KiB (file uploads not counted) | 200002 | editors that save a whole page at once, webhooks with large payloads | [`MODSEC_REQ_BODY_NOFILES_LIMIT`](settings.md#modsec_req_body_nofiles_limit) |
+| 1000 arguments or more (query string and form fields together) | 200007 | WordPress menus with many items, shop products with many variations | [`MODSEC_ARGUMENTS_LIMIT`](settings.md#modsec_arguments_limit) |
+
+**A first week in detection-only mode.** On a new site, start with `MODSEC_RULE_ENGINE=DetectionOnly`: nothing is
+refused, and the audit log records what would have been. Look for the rule IDs above (and any other), set what your
+applications need, add narrow exclusions, then switch back to `On`.
+
+**The settings** apply to every site behind the `edge`. Each replaces the CRS's list, so give the whole list, and each
+prints a `SECURITY:` line at start, because it allows more than the default:
+
+```yaml
+    environment:
+      MODSEC_ALLOWED_METHODS: "GET HEAD POST OPTIONS PUT PATCH DELETE"
+      MODSEC_ALLOWED_REQUEST_CONTENT_TYPE: "|application/x-www-form-urlencoded| |multipart/form-data| |text/xml| |application/xml| |application/soap+xml| |application/json| |application/octet-stream|"
+      MODSEC_REQ_BODY_NOFILES_LIMIT: "1048576"
+      MODSEC_ARGUMENTS_LIMIT: "5000"
+```
+
+**One site only.** A file in `custom.d` can set the CRS's own variable for one host, which is narrower than a setting.
+This one allows `PUT`, `PATCH` and `DELETE` on `app.example.com` (every other host keeps the default):
+
+```
+# custom.d/app-example-com-methods.conf
+SecRule REQUEST_HEADERS:Host "@streq app.example.com" \
+    "id:10120,\
+    phase:1,\
+    pass,\
+    nolog,\
+    setvar:'tx.allowed_methods=GET HEAD POST OPTIONS PUT PATCH DELETE'"
+```
+
+**WordPress's method override.** This file allows the `X-HTTP-Method-Override` header on `app.example.com`. It is the
+CRS's default list of restricted headers without `/x-http-method-override/`; the other two override headers and
+`Expect` stay blocked:
+
+```
+# custom.d/app-example-com-method-override.conf
+SecRule REQUEST_HEADERS:Host "@streq app.example.com" \
+    "id:10110,\
+    phase:1,\
+    pass,\
+    nolog,\
+    setvar:'tx.restricted_headers_basic=/content-encoding/ /proxy/ /lock-token/ /content-range/ /if/ /x-http-method/ /x-method-override/ /x-middleware-subrequest/ /expect/'"
+```
+
+The risk: on that host the application acts on a method the WAF does not see. ModSecurity checks the request as a
+`POST`, while the application handles it as `PUT` or `DELETE`, so the method policy (911100) no longer applies there.
+Keep it to the hosts that need it. Like the `Expect` file below, it freezes the CRS 4.30 list: check the CRS changelog
+when you update, and copy a changed default list. Both files set the same variable, so to allow `Expect` on that host
+as well, leave `/expect/` out of this line instead of adding the other file.
+
+### CRS plugins
+
+The CRS project publishes rule-exclusion plugins for common applications, for example for
+[WordPress](https://github.com/coreruleset/wordpress-rule-exclusions-plugin) and
+[Nextcloud](https://github.com/coreruleset/nextcloud-rule-exclusions-plugin). The image contains none. Take a release
+you have reviewed, and mount the files of its `plugins/` directory at `/etc/nginx/modsec/plugins/` (read-only is
+fine). They are loaded in the CRS's order: every `*-config.conf`, then every `*-before.conf` before the CRS rules, and
+every `*-after.conf` after them. Read the plugin's README: some need a setting in their `*-config.conf`, and some
+apply to every host unless you narrow them.
 
 ## `Expect: 100-continue` is blocked
 
@@ -142,24 +218,61 @@ page, so a user can quote it and you can find the audit entry. The page shows no
   backend responses. A vhost snippet that sets its own `proxy_hide_header` or `proxy_pass_header` (or the FastCGI,
   uWSGI or gRPC variants) **replaces** this list at that place: nginx does not merge the two lists.
 
+## Proxy-wide files in `conf.d`
+
+nginx-proxy's documentation suggests a file in `conf.d` for proxy-wide settings, for example `my_proxy.conf` with
+`server_tokens off;` and `client_max_body_size 100m;`. Such a file is included at http level, where the image also
+sets some directives from its settings, and nginx refuses a directive that is set twice at one level. So the image gives
+way: at start it lets nginx check the configuration, and for each of these directives that a `conf.d` file sets, it
+drops its own line and the file's value applies.
+
+| Directive | Otherwise set from |
+|---|---|
+| `server_tokens` | [`EDGE_SERVER_TOKENS`](settings.md#edge_server_tokens) |
+| `client_header_timeout`, `client_body_timeout`, `send_timeout`, `keepalive_timeout` | the `EDGE_*_TIMEOUT` settings |
+| `large_client_header_buffers` | [`EDGE_LARGE_HEADER_BUFFERS`](settings.md#edge_large_header_buffers) |
+| `add_header_inherit` | [`EDGE_SECURITY_HEADERS`](settings.md#edge_security_headers) (the image sets `merge`) |
+| `msie_padding` | [`EDGE_BLOCK_PAGE`](settings.md#edge_block_page) (the image sets `off` while the block page is on) |
+
+The start-up log names the file and line of each, and the setting that no longer applies:
+
+- `NOTICE:` when the file's value is as strict as the setting's default (`server_tokens off`);
+- `SECURITY:` when it is weaker (`server_tokens on`, `large_client_header_buffers 4 32k`), or when the image cannot
+  compare it with the default (an nginx time such as `1m30s`, a directive spread over several lines).
+
+Only the image's own generated files change, never yours. Any other error in a `conf.d` file, such as an unknown
+directive or a duplicate of a directive the image does not set (`sendfile` is in the stock `nginx.conf`), stops nginx
+as it would without the image. Setting the value through the `EDGE_*` variable instead keeps the start-up check of the
+settings.
+
+The check runs at container start. A conflicting file added while the container runs makes the next reload fail
+(nginx keeps serving the configuration it has), like any broken `conf.d` file: restart the container. After you remove
+such a file, the directive stays unset, so nginx's own default applies (for `server_tokens` that is `on`), until the
+next restart.
+
+## A replaced `nginx.conf`
+
+The image's `/etc/nginx/nginx.conf` loads the ModSecurity module (`load_module modules/ngx_http_modsecurity_module.so;`
+at the top) and includes `/etc/nginx/modsecurity-http.conf` (the WAF) and `/etc/nginx/modsec/rendered/hardening.conf`
+(the `EDGE_*` settings) in its http block, before `conf.d`. If you mount your own `nginx.conf`, keep those three lines.
+Without the includes nginx still starts, but the WAF or the hardening is off, and the start-up log has a `SECURITY:`
+line for each one that is missing.
+
 ## Migrating from an existing nginx-proxy setup
 
-Replace the images and keep your `VIRTUAL_HOST` backends. Two things differ.
+Replace the images and keep your `VIRTUAL_HOST` backends. What differs:
 
-1. **Duplicate directives.** If you have a proxy-wide file in `conf.d` (such as `my_proxy.conf`) that sets
-   `server_tokens`, `client_header_timeout`, `client_body_timeout`, `send_timeout`, `keepalive_timeout`,
-   `large_client_header_buffers` or `msie_padding`, nginx stops with `"directive is duplicate"`, because the image
-   already sets them. Remove those lines and use the `EDGE_*` variables from the [settings table](settings.md)
-   (`EDGE_SERVER_TOKENS`, `EDGE_CLIENT_HEADER_TIMEOUT`, and so on). `msie_padding` is set by the image only while `EDGE_BLOCK_PAGE` is `on`; with `off` the image does not set
-   it. This may be relaxed in a later version.
-2. **Stricter defaults.** Timeouts are 10 s, keep-alive is 15 s (the stock `nginx.conf` has 65 s),
-   request bodies over 128 MiB are refused (nginx's own `client_max_body_size`, 1m unless you raise it for a vhost
-   in nginx-proxy's usual way, refuses larger bodies first: ModSecurity's limit only applies below it), and the WAF blocks attacks. Look for `SECURITY:` lines and 403s in the logs
-   after the move; start with `MODSEC_RULE_ENGINE=DetectionOnly` on a busy site if you want to see the false
-   positives before blocking.
+1. **The WAF.** It blocks attacks, and also some legitimate requests (REST methods, some upload types, large forms):
+   see [first-use false positives](#first-use-false-positives). Look for `SECURITY:` lines and 403s in the logs after
+   the move; start with `MODSEC_RULE_ENGINE=DetectionOnly` on a busy site to see the false positives before blocking.
+2. **Stricter defaults.** Timeouts are 10 s, keep-alive is 15 s (the stock `nginx.conf` has 65 s), and request bodies
+   over 128 MiB are refused (nginx's own `client_max_body_size`, 1m unless you raise it for a vhost in nginx-proxy's
+   usual way, refuses larger bodies first: ModSecurity's limit only applies below it).
+3. **Proxy-wide files in `conf.d`** keep working: where one sets a directive the image also sets, the file's value
+   applies, and the log says so with a `NOTICE:` or `SECURITY:` line, see [proxy-wide files](#proxy-wide-files-in-confd).
 
-Your other `conf.d` files, `vhost.d` and `vhost.d/<host>_location` snippets, `htpasswd`, certificates and per-container
-variables work as before, because the template is nginx-proxy's own.
+Your `vhost.d` and `vhost.d/<host>_location` snippets, `htpasswd`, certificates and per-container variables work as
+before, because the template is nginx-proxy's own.
 
 ## Read-only root filesystem
 
@@ -167,7 +280,7 @@ The `edge` container runs with a read-only root filesystem if you give it these 
 
 | Path | Why |
 |---|---|
-| `/etc/nginx/modsec/rendered` (tmpfs) | The settings, block page and hardening config written at start. |
+| `/etc/nginx/modsec/rendered` (tmpfs) | The settings, block page and hardening config written at start (and changed at start for [proxy-wide files](#proxy-wide-files-in-confd)). |
 | `/var/cache/nginx` and `/run` (tmpfs) | Stock nginx paths. |
 | `/var/cache/modsecurity/tmp` and `/var/cache/modsecurity/data` (tmpfs, `uid=101,gid=101`) | ModSecurity's temporary files and data, written by the `nginx` user. |
 | `/etc/nginx/conf.d`, if it is not a volume | Only if you rely on the official `20-envsubst` and `10-listen-on-ipv6` scripts. |

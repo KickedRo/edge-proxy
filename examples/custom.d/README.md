@@ -4,7 +4,9 @@ Mount a directory of `*.conf` files at `/etc/nginx/modsec/custom.d` in the `edge
 `examples/docker-compose.yml`). The files are loaded **before** the OWASP Core Rule Set, so an exclusion written
 here is in place when the rule runs. Files that must come after the rules (`SecRuleRemoveById`, response
 exclusions) go in `/etc/nginx/modsec/after.d` instead. An empty or missing directory is fine. The configuration
-guide has the [full picture](../../docs/configuration.md#mount-points-for-your-own-rules-and-config).
+guide has the [full picture](../../docs/configuration.md#mount-points-for-your-own-rules-and-config), and the usual
+[first-use false positives](../../docs/configuration.md#first-use-false-positives) (REST methods, upload types,
+WordPress's method override, large forms) with their settings and files.
 
 ## How exclusions work
 

@@ -5,8 +5,10 @@
 #   scripts/publish_tested.sh identity IMAGE
 #     Prints (JSON, sorted keys) what makes a local image what it is: OS, architecture and variant, the layer diff IDs
 #     (sha256 of each uncompressed layer, i.e. the filesystem bit for bit) and the runtime configuration as
-#     `docker image inspect` shows it (env, entrypoint, cmd, user, working dir, labels, ...), without the
-#     org.kickedro.build-key label, which only exists after testing. Timestamps and image ids are not part of it.
+#     `docker image inspect` shows it (env, entrypoint, cmd, user, working dir, labels, ...), without the two labels
+#     that are set when publishing: org.kickedro.build-key (it only exists after testing) and
+#     org.opencontainers.image.version (the release tag, chosen at publish time). Timestamps and image ids are not
+#     part of it.
 #
 #   scripts/publish_tested.sh decide KEY WEEKDAY FORCE_PUBLISH FORCE_SKIP_CHECK REPOSITORY...
 #     Prints "true" (publish) or "false" (skip); the reasons go to stderr. Publish when the :latest of any
@@ -16,21 +18,29 @@
 #     next day; counted in whole days so the run on the Sunday before the weekly publish does not publish as well),
 #     or FORCE_PUBLISH is true. PUBLISH_DECIDE_NOW (seconds since the epoch) replaces the current time, for tests.
 #
-#   scripts/publish_tested.sh push ARCHIVE TESTED_IDENTITY REPOSITORY KEY
+#   scripts/publish_tested.sh release-tag REPOSITORY BASE_TAG
+#     Prints the release tag for a publish now: BASE_TAG (the versions and the UTC date) if REPOSITORY has no such tag
+#     yet, else the first of BASE_TAG.2, BASE_TAG.3, ... it does not have. A published release tag never moves. Fails
+#     when the registry cannot tell whether a tag exists.
+#
+#   scripts/publish_tested.sh push ARCHIVE TESTED_IDENTITY REPOSITORY KEY RELEASE_TAG
 #     Publishes the tested image without rebuilding it. ARCHIVE is `docker save` of the tested image (an OCI image
 #     layout since Docker 25); a one-line Dockerfile `FROM tested`, with the archive as the named build context
-#     "tested", adds the org.kickedro.build-key label (a configuration change, no layer) and is pushed by digest
-#     only (no tag), with buildx's SBOM attestation (syft scanner pinned below) and provenance (mode=max; builder id
-#     from PROVENANCE_BUILDER_ID when set). Then `check` must pass. Prints the pushed digest (of the manifest index).
+#     "tested", adds the org.kickedro.build-key label KEY and the org.opencontainers.image.version label RELEASE_TAG
+#     (configuration changes, no layer) and is pushed by digest only (no tag), with buildx's SBOM attestation (syft
+#     scanner pinned below) and provenance (mode=max; builder id from PROVENANCE_BUILDER_ID when set). Then `check`
+#     must pass. Prints the pushed digest (of the manifest index).
 #
-#   scripts/publish_tested.sh check TESTED_IDENTITY REF KEY
-#     The same-bits check: pulls REF and requires its org.kickedro.build-key label to be KEY and its identity (see
-#     above) to equal TESTED_IDENTITY, the identity of the image the smoke tests and the Trivy gate ran on. Prints
-#     the difference otherwise. The pulled image is removed again.
+#   scripts/publish_tested.sh check TESTED_IDENTITY REF KEY RELEASE_TAG
+#     The same-bits check: pulls REF and requires its org.kickedro.build-key label to be KEY, its
+#     org.opencontainers.image.version label to be RELEASE_TAG, and its identity (see above) to equal TESTED_IDENTITY,
+#     the identity of the image the smoke tests and the Trivy gate ran on. Prints the difference otherwise. The pulled
+#     image is removed again.
 #
 #   scripts/publish_tested.sh tag REPOSITORY DIGEST TAG...
 #     Points each TAG at DIGEST (`docker buildx imagetools create` with a single manifest-index source re-tags it
-#     unchanged) and verifies that every tag now resolves to DIGEST.
+#     unchanged) and verifies that every tag now resolves to DIGEST. Only `latest` may move: any other TAG that already
+#     points elsewhere is refused before anything is tagged.
 #
 # The buildx builder is the current one (BUILDX_BUILDER selects another); registry credentials come from
 # `docker login`. Exit 0 on success, 2 on usage errors, another non-zero status on any failure.
@@ -39,6 +49,8 @@ set -euo pipefail
 # BuildKit's SBOM generator, docker/buildkit-syft-scanner 1.12.1 (the stable-1 tag on 2026-11-13), pinned by digest.
 SBOM_GENERATOR=docker/buildkit-syft-scanner@sha256:873a7458c3c8ac8e32c7b796c10e1600b07b963d2aa000a72a2d97aaaa2d6315
 KEY_LABEL=org.kickedro.build-key
+VERSION_LABEL=org.opencontainers.image.version
+TAG_RE='^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$'
 
 die() { echo "publish_tested: $*" >&2; exit 1; }
 usage() { grep '^#   scripts/publish_tested.sh ' "$0" | sed 's/^#   /usage: /' >&2; exit 2; }
@@ -46,10 +58,38 @@ WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
 identity() {
-  docker image inspect "$1" | jq -S --arg l "$KEY_LABEL" '.[0] | {
+  docker image inspect "$1" | jq -S --arg k "$KEY_LABEL" --arg v "$VERSION_LABEL" '.[0] | {
     Os, Architecture, Variant: (.Variant // ""),
     DiffIDs: .RootFS.Layers,
-    Config: (.Config | .Labels = ((.Labels // {}) | del(.[$l])))}'
+    Config: (.Config | .Labels = ((.Labels // {}) | del(.[$k], .[$v])))}'
+}
+
+digest_of() { # REF: the digest REF resolves to, or nothing when the registry has no such tag; fails when it cannot tell
+  local out
+  if out=$(docker buildx imagetools inspect "$1" --format '{{json .Manifest}}' 2>&1); then
+    jq -er '.digest' <<<"$out" || die "$1: no digest in: $out"
+  elif [[ $out == *": not found" ]]; then
+    return 0
+  else
+    die "cannot tell whether $1 exists: ${out//$'\n'/ }"
+  fi
+}
+
+release_tag() {
+  [ $# -eq 2 ] || usage
+  local repo=$1 base=$2 n t got
+  [[ $base =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,124}$ ]] || die "not a valid base tag: '$base'"
+  for n in $(seq 1 99); do
+    t=$base
+    [ "$n" = 1 ] || t="$base.$n"
+    got=$(digest_of "$repo:$t") || exit 1 # the registry could not tell: never guess
+    if [ -z "$got" ]; then
+      echo "$t"
+      return 0
+    fi
+    echo "taken: $repo:$t ($got)" >&2
+  done
+  die "no free release tag from $base to $base.99"
 }
 
 latest_info() { # REPOSITORY: "<build key> <created>" of REPOSITORY:latest ("-" for a missing field), or nothing
@@ -126,27 +166,30 @@ image_manifest() { # LAYOUT_DIR: digest of the single image manifest in an OCI l
 }
 
 check() {
-  [ $# -eq 3 ] || usage
-  local tested=$1 ref=$2 key=$3 got
+  [ $# -eq 4 ] || usage
+  local tested=$1 ref=$2 key=$3 version=$4 got_key got_version
   [ -r "$tested" ] || die "cannot read $tested"
   docker pull -q "$ref" >/dev/null
-  got=$(docker image inspect -f "{{index .Config.Labels \"$KEY_LABEL\"}}" "$ref")
+  got_key=$(docker image inspect -f "{{index .Config.Labels \"$KEY_LABEL\"}}" "$ref")
+  got_version=$(docker image inspect -f "{{index .Config.Labels \"$VERSION_LABEL\"}}" "$ref")
   identity "$ref" > "$WORK/pushed-identity.json"
   docker image rm "$ref" >/dev/null 2>&1 || true
-  [ "$got" = "$key" ] || die "$ref: build key label is '$got', expected $key"
+  [ "$got_key" = "$key" ] || die "$ref: build key label is '$got_key', expected $key"
+  [ "$got_version" = "$version" ] || die "$ref: version label is '$got_version', expected $version"
   if ! diff -u <(jq -S . "$tested") "$WORK/pushed-identity.json" >&2; then
     die "$ref differs from the tested image (diff above: - tested, + pushed)"
   fi
   echo "same bits: $ref has the tested image's $(jq '.DiffIDs | length' "$tested") layers and configuration," \
-    "plus build key $key" >&2
+    "plus build key $key and version $version" >&2
 }
 
 push() {
-  [ $# -eq 4 ] || usage
-  local archive=$1 tested=$2 repo=$3 key=$4 manifest digest
+  [ $# -eq 5 ] || usage
+  local archive=$1 tested=$2 repo=$3 key=$4 version=$5 manifest digest
   [ -r "$archive" ] || die "cannot read $archive"
   [ -r "$tested" ] || die "cannot read $tested"
   [[ $key =~ ^sha256:[0-9a-f]{64}$ ]] || die "KEY must be sha256:<64 hex digits>"
+  [[ $version =~ $TAG_RE ]] || die "not a valid release tag: '$version'"
   mkdir "$WORK/layout" "$WORK/context"
   tar -xf "$archive" -C "$WORK/layout"
   if [ ! -f "$WORK/layout/oci-layout" ] || [ ! -f "$WORK/layout/index.json" ]; then
@@ -156,14 +199,14 @@ push() {
   printf 'FROM tested\n' > "$WORK/context/Dockerfile"
   docker buildx build --progress plain \
     --build-context "tested=oci-layout://$WORK/layout@$manifest" \
-    --label "$KEY_LABEL=$key" \
+    --label "$KEY_LABEL=$key" --label "$VERSION_LABEL=$version" \
     --sbom "generator=$SBOM_GENERATOR" \
     --provenance "mode=max${PROVENANCE_BUILDER_ID:+,builder-id=$PROVENANCE_BUILDER_ID}" \
     --output "type=image,name=$repo,push-by-digest=true,name-canonical=true,push=true,compression=gzip,force-compression=true,oci-mediatypes=true" \
     --metadata-file "$WORK/metadata.json" "$WORK/context" >&2
   digest=$(jq -r '."containerimage.digest" // empty' "$WORK/metadata.json")
   [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]] || die "no image digest in the build metadata"
-  check "$tested" "$repo@$digest" "$key"
+  check "$tested" "$repo@$digest" "$key" "$version"
   echo "$digest"
 }
 
@@ -174,7 +217,11 @@ tag() {
   local args=()
   [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]] || die "DIGEST must be sha256:<64 hex digits>"
   for t in "$@"; do
-    [[ $t =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] || die "not a valid tag: '$t'"
+    [[ $t =~ $TAG_RE ]] || die "not a valid tag: '$t'"
+    if [ "$t" != latest ]; then
+      got=$(digest_of "$repo:$t") || exit 1 # the registry could not tell: never guess
+      [ -z "$got" ] || [ "$got" = "$digest" ] || die "$repo:$t is published (at $got) and never moves"
+    fi
     args+=(--tag "$repo:$t")
   done
   docker buildx imagetools create "${args[@]}" "$repo@$digest" >&2
@@ -191,6 +238,7 @@ shift
 case "$cmd" in
   identity) [ $# -eq 1 ] || usage; identity "$1" ;;
   decide) decide "$@" ;;
+  release-tag) release_tag "$@" ;;
   push) push "$@" ;;
   check) check "$@" ;;
   tag) tag "$@" ;;

@@ -68,7 +68,8 @@ jobs:
       # The UTC date, taken once so every job of the run agrees. SECURITY_EPOCH: build argument consumed only by
       # the security-upgrade layers of the images (apt upgrade, docker-gen's vulnerability-driven module upgrades),
       # so they re-run once a day while the expensive layers (the ModSecurity compile) stay cached. The weekday
-      # (1 = Monday) drives the weekly publish; the tags are the release tags of a publish.
+      # (1 = Monday) drives the weekly publish; the tags are the day's release tags (the build's version label; the
+      # publish job adds .2, .3, ... when one is already taken).
       - name: Date, security epoch and release tags
         id: date
         env:
@@ -328,15 +329,31 @@ jobs:
           printf '%s\n' "$SUMS" > "$RUNNER_TEMP/SHA256SUMS"
           [ "$(wc -l < "$RUNNER_TEMP/SHA256SUMS")" = 4 ] || { echo "expected 4 checksums from build-test" >&2; exit 1; }
           sha256sum --strict -c "$RUNNER_TEMP/SHA256SUMS"
+      # The release tags of this publish, looked up in the registry now: the day's tag from the resolve job, or the
+      # next free .2, .3, ... when it is taken (a published release tag never moves). The images get them as their
+      # version label.
+      - name: Release tags
+        id: release
+        if: steps.decide.outputs.publish == 'true'
+        env:
+          EDGE_TAG: ${{ needs.resolve.outputs.edge_tag }}
+          GEN_TAG: ${{ needs.resolve.outputs.gen_tag }}
+        run: |
+          edge=$(scripts/publish_tested.sh release-tag "$EDGE_REPOSITORY" "$EDGE_TAG")
+          gen=$(scripts/publish_tested.sh release-tag "$GEN_REPOSITORY" "$GEN_TAG")
+          echo "edge=$edge" >> "$GITHUB_OUTPUT"
+          echo "gen=$gen" >> "$GITHUB_OUTPUT"
       - name: Push by digest, with SBOM and provenance; same-bits check
         id: push
         if: steps.decide.outputs.publish == 'true'
         env:
           PROVENANCE_BUILDER_ID: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EDGE_TAG: ${{ steps.release.outputs.edge }}
+          GEN_TAG: ${{ steps.release.outputs.gen }}
         run: |
           t="$RUNNER_TEMP/tested"
-          edge=$(scripts/publish_tested.sh push "$t/edge.tar" "$t/edge.json" "$EDGE_REPOSITORY" "$KEY")
-          gen=$(scripts/publish_tested.sh push "$t/gen.tar" "$t/gen.json" "$GEN_REPOSITORY" "$KEY")
+          edge=$(scripts/publish_tested.sh push "$t/edge.tar" "$t/edge.json" "$EDGE_REPOSITORY" "$KEY" "$EDGE_TAG")
+          gen=$(scripts/publish_tested.sh push "$t/gen.tar" "$t/gen.json" "$GEN_REPOSITORY" "$KEY" "$GEN_TAG")
           echo "edge=$edge" >> "$GITHUB_OUTPUT"
           echo "gen=$gen" >> "$GITHUB_OUTPUT"
       - if: steps.decide.outputs.publish == 'true'
@@ -369,14 +386,15 @@ jobs:
           push-to-registry: true
           # Storage records (the organization's "Linked Artifacts" page) would need artifact-metadata: write.
           create-storage-record: false
-      # Tags last: :latest moves only to images that passed the same-bits check and are signed and attested.
+      # Tags last: :latest moves only to images that passed the same-bits check and are signed and attested. The
+      # release tags are new (publish_tested.sh refuses to move one).
       - name: Tag
         if: steps.decide.outputs.publish == 'true'
         env:
           EDGE_DIGEST: ${{ steps.push.outputs.edge }}
           GEN_DIGEST: ${{ steps.push.outputs.gen }}
-          EDGE_TAG: ${{ needs.resolve.outputs.edge_tag }}
-          GEN_TAG: ${{ needs.resolve.outputs.gen_tag }}
+          EDGE_TAG: ${{ steps.release.outputs.edge }}
+          GEN_TAG: ${{ steps.release.outputs.gen }}
         run: |
           scripts/publish_tested.sh tag "$EDGE_REPOSITORY" "$EDGE_DIGEST" "$EDGE_TAG" latest
           scripts/publish_tested.sh tag "$GEN_REPOSITORY" "$GEN_DIGEST" "$GEN_TAG" latest

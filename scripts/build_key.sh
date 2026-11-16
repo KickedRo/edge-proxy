@@ -9,9 +9,9 @@
 #
 # Inputs, hashed as one canonical text in this order:
 #   versions     every line of VERSIONS_FILE (all resolved upstream versions), sorted
-#   source       git object ids at HEAD of edge/, gen/, pins.env and .github/workflows/build.yml (Dockerfiles,
-#                configuration, build arguments, labels). Uncommitted changes are not seen: run it on a clean
-#                checkout, as CI does.
+#   source       git object ids at HEAD of edge/, gen/, pins.env, .github/workflows/build.yml (Dockerfiles,
+#                configuration, build arguments, labels), LICENSE and NOTICE (both are copied into the images).
+#                Uncommitted changes are not seen: run it on a clean checkout, as CI does.
 #   materials    what each build fetched, with digests, from buildx's metadata file (--metadata-file, or
 #                build-push-action's metadata output; "buildx.build.provenance" materials): the base images the
 #                FROM lines resolved to and downloaded files. The Dockerfile frontend (docker/dockerfile) is left
@@ -65,7 +65,7 @@ image_section() { # NAME IMAGE FILE...
   echo "[versions]"
   LC_ALL=C sort "$versions"
   echo "[source]"
-  for p in edge gen pins.env .github/workflows/build.yml; do
+  for p in edge gen pins.env .github/workflows/build.yml LICENSE NOTICE; do
     id=$(git -C "$root" rev-parse --verify "HEAD:$p")
     echo "$p $id"
   done

@@ -4,6 +4,7 @@
 #
 # Change before use: the host names (example.com is a placeholder), the e-mail address, and the Docker socket path
 # if you do not run rootful Docker. Then: docker compose up -d
+# Every service has "restart: unless-stopped", so the front door comes back after a reboot or a Docker restart.
 #
 # The images below are referenced by :latest to keep the example short. For a real deployment, verify an image (see
 # docs/verify.md) and pin it by digest: image: ghcr.io/kickedro/edge-proxy@sha256:<digest>
@@ -25,6 +26,7 @@ services:
   nginx-proxy:
     image: ghcr.io/kickedro/edge-proxy:latest
     container_name: nginx-proxy
+    restart: unless-stopped
     networks: [proxy]
     ports:
       - "80:80"
@@ -52,9 +54,11 @@ services:
       - nginx_dhparam:/etc/nginx/dhparam:ro
       - nginx_errors:/usr/share/nginx/html/errors:ro
       - nginx_html:/usr/share/nginx/html:ro
-      # Your own WAF rules (see docs/configuration.md and examples/custom.d/README.md); both directories may be absent.
+      # Your own WAF rules (see docs/configuration.md and examples/custom.d/README.md) and OWASP CRS plugins; each
+      # directory may be absent.
       # - ./custom.d:/etc/nginx/modsec/custom.d:ro
       # - ./after.d:/etc/nginx/modsec/after.d:ro
+      # - ./plugins:/etc/nginx/modsec/plugins:ro
     labels:
       # gen finds this container by the label named in its NGINX_CONTAINER_LABEL; acme-companion by this exact name.
       - com.github.nginx-proxy.nginx=true
@@ -62,6 +66,7 @@ services:
   nginx-proxy-gen:
     image: ghcr.io/kickedro/edge-proxy-gen:latest
     container_name: nginx-proxy-gen
+    restart: unless-stopped
     # No network at all: it only reads the Docker socket and writes files.
     network_mode: none
     cap_drop: [ALL]
@@ -95,6 +100,7 @@ services:
     # (docker buildx imagetools inspect nginxproxy/acme-companion:<version>), and change both.
     image: nginxproxy/acme-companion:2.8.2@sha256:e3c5fb08bf623ae93dbc945d78fe50040c1fa107ddf59f7ee04ba6a61f34cbc1
     container_name: nginx-proxy-acme
+    restart: unless-stopped
     security_opt: ["no-new-privileges:true"]
     environment:
       DEFAULT_EMAIL: "admin@example.com"
@@ -108,8 +114,10 @@ services:
   # A test backend. Remove it and start your own containers with VIRTUAL_HOST (and ACME_HOST, for a
   # certificate) on the proxy network. Replace app.example.com with a name that points at this host.
   whoami:
-    image: jwilder/whoami
+    # Pinned by version and digest (the multi-platform image index of the tag v1.11.0), like the CI smoke tests.
+    image: traefik/whoami:v1.11.0@sha256:200689790a0a0ea48ca45992e0450bc26ccab5307375b41c84dfc4f2475937ab
     container_name: whoami
+    restart: unless-stopped
     networks: [proxy]
     environment:
       VIRTUAL_HOST: app.example.com

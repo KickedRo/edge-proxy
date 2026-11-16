@@ -30,7 +30,7 @@ fail() { echo "FAIL $1${2:+: $2}" >&2; exit 1; }
 expect_eq() { [ "$2" = "$3" ] && pass "$1" || fail "$1" "expected '$3', got '$2'"; }
 
 # ---- test data ------------------------------------------------------------------------------
-mkdir -p "$WORK/conf.d" "$WORK/empty-custom" "$WORK/empty-after"
+mkdir -p "$WORK/conf.d" "$WORK/empty-custom" "$WORK/empty-after" "$WORK/empty-plugins"
 cat > "$WORK/conf.d/test.conf" <<'CONF'
 server {
     listen 80 default_server;
@@ -56,6 +56,28 @@ head -c 20000000 "$WORK/upload.full" > "$WORK/upload.txt"
 rm -f "$WORK/upload.full"
 [ "$(stat -c %s "$WORK/upload.txt")" -ge 20000000 ] || fail setup "could not generate the upload file"
 chmod 644 "$WORK/upload.txt"
+# Request bodies without attack content that hit ModSecurity's own limits: 230 KB of form data (the limit without files
+# is 128 KiB), a form with 1000 fields (the argument limit), and one with 999.
+{ printf 'a='; head -c 230000 /dev/zero | tr '\0' a; } > "$WORK/form-230k.txt"
+fields() { seq -s '&' 0 $(($1 - 1)) | sed 's/[0-9][0-9]*/f&=1/g'; }
+fields 1000 > "$WORK/form-1000.txt"
+fields 999 > "$WORK/form-999.txt"
+chmod 644 "$WORK"/form-*.txt
+# A tiny OWASP CRS plugin: proves the plugins mount loads *-config.conf, then *-before.conf before the CRS rules, then
+# *-after.conf after them. Each phase-1 rule appends a letter: b only before the CRS's initialisation has run (its
+# rule 901200 sets tx.blocking_inbound_anomaly_score), a only after it. Only the order c, b, a answers 418.
+mkdir -p "$WORK/plugins"
+cat > "$WORK/plugins/order-test-config.conf" <<'RULES'
+SecAction "id:10901,phase:1,pass,nolog,setvar:'tx.order_test=c'"
+RULES
+cat > "$WORK/plugins/order-test-before.conf" <<'RULES'
+SecRule &TX:blocking_inbound_anomaly_score "@eq 0" "id:10902,phase:1,pass,nolog,setvar:'tx.order_test=%{tx.order_test}b'"
+RULES
+cat > "$WORK/plugins/order-test-after.conf" <<'RULES'
+SecRule &TX:blocking_inbound_anomaly_score "@eq 1" "id:10903,phase:1,pass,nolog,setvar:'tx.order_test=%{tx.order_test}a'"
+SecRule TX:order_test "@streq cba" "id:10904,phase:1,deny,status:418,log,msg:'plugin files loaded in order'"
+RULES
+chmod -R a+rX "$WORK/plugins"
 
 # ---- docker helpers ---------------------------------------------------------------------------
 new_network() { # name subnet4 [subnet6]
@@ -126,8 +148,9 @@ edge() { # name [env args...]
 # ---- 1. config-only checks (no network needed) --------------------------------------------------
 docker run --rm "$IMAGE" nginx -t >/dev/null 2>&1 || fail nginx_t "nginx -t failed"
 docker run --rm -v "$WORK/empty-custom:/etc/nginx/modsec/custom.d:ro" \
-  -v "$WORK/empty-after:/etc/nginx/modsec/after.d:ro" "$IMAGE" nginx -t >/dev/null 2>&1 \
-  || fail nginx_t "nginx -t failed with empty custom.d and after.d mounted"
+  -v "$WORK/empty-after:/etc/nginx/modsec/after.d:ro" -v "$WORK/empty-plugins:/etc/nginx/modsec/plugins:ro" \
+  "$IMAGE" nginx -t >/dev/null 2>&1 \
+  || fail nginx_t "nginx -t failed with empty custom.d, after.d and plugins mounted"
 pass nginx_t
 
 DUMP=$(docker run --rm "$IMAGE" nginx -T 2>&1) || fail module_loaded "nginx -T failed: $DUMP"
@@ -162,6 +185,29 @@ for id in 949110 949111 959100 959101; do
     || fail crs_blocking_rules "CRS rule $id not found; update templates/modsecurity-after-crs.conf.template"
 done
 pass crs_blocking_rules
+
+# The CRS policy settings default to the built CRS's own lists (rules 901160 and 901162 of REQUEST-901-INITIALIZATION.conf
+# set them when nothing else has): a CRS release that changes them fails here, so settings.tsv follows on purpose.
+CRS_INIT=$(docker run --rm --entrypoint cat "$IMAGE" /etc/nginx/modsec/crs/rules/REQUEST-901-INITIALIZATION.conf) \
+  || fail crs_policy_defaults "cannot read the CRS's initialisation rules"
+SETTINGS=$(docker run --rm --entrypoint cat "$IMAGE" /usr/local/share/kickedro/settings.tsv) \
+  || fail crs_policy_defaults "cannot read the settings file"
+crs_default() { # rule-id tx-variable -> the value that CRS rule sets
+  awk -v id="\"id:$1," -v var="setvar:'tx.$2=" -v tail="'\"" '
+    index($0, id) { found = 1 }
+    found && (i = index($0, var)) {
+      v = substr($0, i + length(var))
+      if (substr(v, length(v) - 1) == tail) print substr(v, 1, length(v) - 2)
+      exit
+    }' <<<"$CRS_INIT"
+}
+for check in 901160:allowed_methods:MODSEC_ALLOWED_METHODS \
+  901162:allowed_request_content_type:MODSEC_ALLOWED_REQUEST_CONTENT_TYPE; do
+  IFS=: read -r id var setting <<<"$check"
+  CRS=$(crs_default "$id" "$var")
+  [ -n "$CRS" ] || fail crs_policy_defaults "rule $id does not set tx.$var in the CRS; update edge/settings.tsv and this test"
+  expect_eq "crs_policy_default_$var" "$(awk -F '\t' -v v="$setting" '$1 == v { print $2 }' <<<"$SETTINGS")" "$CRS"
+done
 
 # User templates keep working: the official NGINX_ENVSUBST_* mechanism is untouched.
 mkdir -p "$WORK/usertpl"
@@ -274,16 +320,89 @@ sleep 1
 expect_eq audit_after_reload_status "$(status "http://$RUN-on/?t=rl1&q=<script>alert(1)</script>")" 403
 wait_audit "$RUN-on" 't=rl1' >/dev/null && pass audit_after_reload || fail audit_after_reload "no audit entry after nginx -s reload"
 
-# Empty custom.d / after.d mounted over the image's: server must start and still block.
-edge emptydirs -e MODSEC_RULE_ENGINE=On \
-  -v "$WORK/empty-custom:/etc/nginx/modsec/custom.d:ro" -v "$WORK/empty-after:/etc/nginx/modsec/after.d:ro"
+# Empty custom.d / after.d / plugins mounted over the image's: server must start and still block.
+edge emptydirs -e MODSEC_RULE_ENGINE=On -v "$WORK/empty-custom:/etc/nginx/modsec/custom.d:ro" \
+  -v "$WORK/empty-after:/etc/nginx/modsec/after.d:ro" -v "$WORK/empty-plugins:/etc/nginx/modsec/plugins:ro"
 expect_eq empty_mounts_block "$(status "http://$RUN-emptydirs$XSS")" 403
 
-# A custom.d rule is loaded (site exclusions go there).
+# A custom.d rule is loaded (site exclusions go there). The other two files are the per-site snippets of
+# docs/configuration.md ("First-use false positives"), word for word.
 mkdir -p "$WORK/custom"
 echo 'SecRule REQUEST_URI "@beginsWith /custom-test" "id:10100,phase:1,pass,nolog,ctl:ruleEngine=Off"' > "$WORK/custom/site.conf"
+cat > "$WORK/custom/method-override.conf" <<'RULES'
+SecRule REQUEST_HEADERS:Host "@streq app.example.com" \
+    "id:10110,\
+    phase:1,\
+    pass,\
+    nolog,\
+    setvar:'tx.restricted_headers_basic=/content-encoding/ /proxy/ /lock-token/ /content-range/ /if/ /x-http-method/ /x-method-override/ /x-middleware-subrequest/ /expect/'"
+RULES
+cat > "$WORK/custom/api-methods.conf" <<'RULES'
+SecRule REQUEST_HEADERS:Host "@streq app.example.com" \
+    "id:10120,\
+    phase:1,\
+    pass,\
+    nolog,\
+    setvar:'tx.allowed_methods=GET HEAD POST OPTIONS PUT PATCH DELETE'"
+RULES
+chmod -R a+rX "$WORK/custom"
 edge custom -e MODSEC_RULE_ENGINE=On -v "$WORK/custom:/etc/nginx/modsec/custom.d:ro"
 expect_eq custom_d_loaded "$(status "http://$RUN-custom/custom-test?q=<script>alert(1)</script>")" 200
+
+# ---- first-use false positives (docs/configuration.md): the CRS's default policy and ModSecurity's body limits -----
+# Methods other than GET HEAD POST OPTIONS (911100), body types outside the allowed list (920420) and method-override
+# headers (920450) are refused by default; the settings and the snippet above let them through.
+WP_POST=(-H 'Content-Type: application/json' --data '{"title":"hello"}')
+for m in PUT PATCH DELETE; do
+  expect_eq "method_${m,,}_refused" "$(status "http://$RUN-on/api/x" -X "$m" "${WP_POST[@]}")" 403
+done
+expect_eq octet_stream_refused "$(status "http://$RUN-on/dav/f" -X PUT -H 'Content-Type: application/octet-stream' --data-binary 'abc')" 403
+expect_eq method_override_refused "$(status "http://$RUN-on/wp-json/wp/v2/posts/1" -H 'X-HTTP-Method-Override: PUT' "${WP_POST[@]}")" 403
+edge policy -e 'MODSEC_ALLOWED_METHODS=GET HEAD POST OPTIONS PUT PATCH DELETE' \
+  -e 'MODSEC_ALLOWED_REQUEST_CONTENT_TYPE=|application/x-www-form-urlencoded| |multipart/form-data| |text/xml| |application/xml| |application/soap+xml| |application/json| |application/octet-stream|'
+for m in PUT PATCH DELETE; do
+  expect_eq "method_${m,,}_allowed" "$(status "http://$RUN-policy/api/x" -X "$m" "${WP_POST[@]}")" 200
+done
+expect_eq octet_stream_allowed "$(status "http://$RUN-policy/dav/f" -X PUT -H 'Content-Type: application/octet-stream' --data-binary 'abc')" 200
+expect_eq method_still_refused "$(status "http://$RUN-policy/dav/f" -X PROPFIND)" 403
+expect_eq method_override_snippet "$(status "http://$RUN-custom/wp-json/wp/v2/posts/1" -H 'X-HTTP-Method-Override: PUT' "${WP_POST[@]}")" 200
+expect_eq method_override_snippet_other_host "$(docker exec "$CLIENT" curl -s -o /dev/null -w '%{http_code}' \
+  -H 'Host: other.example.com' -H 'X-HTTP-Method-Override: PUT' "${WP_POST[@]}" "http://$RUN-custom/wp-json/wp/v2/posts/1" \
+  || true)" 403
+expect_eq method_override_snippet_keeps_others "$(status "http://$RUN-custom/" -H 'X-HTTP-Method: PUT' --data 'a=1')" 403
+expect_eq methods_snippet "$(status "http://$RUN-custom/api/x" -X DELETE)" 200
+expect_eq methods_snippet_other_host "$(docker exec "$CLIENT" curl -s -o /dev/null -w '%{http_code}' -X DELETE \
+  -H 'Host: other.example.com' "http://$RUN-custom/api/x" || true)" 403
+
+# A body over the limit without files, and a form that reaches the argument limit, get the deny status and the block
+# page, whose reference is the audit entry of the body check (rules 200002 and 200007); 999 fields pass.
+block_page_for_rule() { # name rule-id marker body-file -> the deny status, the block page and that rule in the audit entry
+  local name=$1 rule=$2 marker=$3 file=$4 resp code id entry
+  docker cp "$WORK/$file" "$CLIENT:/tmp/$file" >/dev/null
+  resp=$(docker exec "$CLIENT" curl -s -g -w '\n%{http_code}' -H 'Host: app.example.com' -H 'Expect:' \
+    --data-binary "@/tmp/$file" "http://$RUN-on/?t=$marker" || true)
+  code=${resp##*$'\n'}
+  [ "$code" = 403 ] || fail "$name" "status $code"
+  grep -q 'blocked for security reasons' <<<"$resp" || fail "$name" "not the block page: $(head -c 300 <<<"$resp")"
+  id=$(grep -oE '[0-9a-f]{32}' <<<"$resp" | sort -u || true)
+  [ -n "$id" ] && [ "$(wc -l <<<"$id")" = 1 ] || fail "$name" "no single reference on the page"
+  entry=$(wait_audit "$RUN-on" "t=$marker") || fail "$name" "no audit entry"
+  jq -e --arg id "$id" --arg rule "$rule" 'select(.transaction.unique_id == $id)
+    | any(.transaction.messages[]; .details.ruleId == $rule)' <<<"$entry" >/dev/null \
+    || fail "$name" "the audit entry for $id has no rule $rule: $entry"
+  pass "$name"
+}
+block_page_for_rule body_over_nofiles_limit 200002 bl1 form-230k.txt
+block_page_for_rule arguments_limit 200007 bl2 form-1000.txt
+docker cp "$WORK/form-999.txt" "$CLIENT:/tmp/form-999.txt" >/dev/null
+expect_eq arguments_below_limit "$(status "http://$RUN-on/" -H 'Expect:' --data-binary @/tmp/form-999.txt)" 200
+edge limits -e MODSEC_REQ_BODY_NOFILES_LIMIT=262144 -e MODSEC_ARGUMENTS_LIMIT=1001
+expect_eq body_nofiles_limit_raised "$(status "http://$RUN-limits/" -H 'Expect:' --data-binary @/tmp/form-230k.txt)" 200
+expect_eq arguments_limit_raised "$(status "http://$RUN-limits/" -H 'Expect:' --data-binary @/tmp/form-1000.txt)" 200
+
+# CRS plugins: the test plugin's files run in the CRS's order (config, before, the CRS rules, after).
+edge plugins -v "$WORK/plugins:/etc/nginx/modsec/plugins:ro"
+expect_eq plugins_loaded_in_order "$(status "http://$RUN-plugins/")" 418
 
 edge status406 -e MODSEC_RULE_ENGINE=On -e MODSEC_DENY_STATUS=406
 expect_eq deny_status_env "$(status "http://$RUN-status406$XSS")" 406

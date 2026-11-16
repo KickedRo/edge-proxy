@@ -107,13 +107,34 @@ LOGS=$(docker logs "$RUN-invalid2" 2>&1)
 
 # Every value form is validated: one invalid value per form, all reported before the container stops.
 INVALID=(MODSEC_PARANOIA=5 MODSEC_ANOMALY_INBOUND=0 MODSEC_REQ_BODY_LIMIT=12ab MODSEC_AUDIT_LOG=relative.log
-  MODSEC_DENY_STATUS=200 EDGE_CLIENT_HEADER_TIMEOUT=10 EDGE_LARGE_HEADER_BUFFERS=4 EDGE_SECURITY_HEADERS=yes)
+  MODSEC_DENY_STATUS=200 EDGE_CLIENT_HEADER_TIMEOUT=10 EDGE_LARGE_HEADER_BUFFERS=4 EDGE_SECURITY_HEADERS=yes
+  "MODSEC_ALLOWED_METHODS=GET',setvar:tx.x=1" 'MODSEC_ALLOWED_REQUEST_CONTENT_TYPE=application/json')
 ARGS=(); for kv in "${INVALID[@]}"; do ARGS+=(-e "$kv"); done
 OUT=$(docker run --rm "${ARGS[@]}" "$IMAGE" nginx -t 2>&1) && fail invalid_values_refused "accepted: $OUT"
 for kv in "${INVALID[@]}"; do
   grep -q "^ERROR: ${kv%%=*}=" <<<"$OUT" || fail invalid_values_refused "no error for ${kv%%=*} in: $OUT"
 done
 pass invalid_values_refused
+# The list forms are strict: these values are refused (case, spacing, separators, quotes, macros, newlines), and
+# well-formed lists are accepted. Checked with the image's own value rules (settings-lib.sh), in one container.
+OUT=$(docker run --rm --entrypoint sh "$IMAGE" -c '. /usr/local/share/kickedro/settings-lib.sh
+  nl="
+"
+  for v in get "GET  PUT" " GET" "GET " GET,PUT "GET'\''" -GET "GET${nl}PUT" "GET%{tx.x}" ""; do
+    if matches "$v" "<methods>"; then echo "accepted <methods>: [$v]"; fi
+  done
+  for v in application/json "|application/json|  |text/plain|" "|Application/json|" "|application/json" "|a/b/c|" \
+    "|text/plain|,|a/b|" "|text/plain'\''|" "|/json|" "|%{tx.x}/a|" "|text/plain|${nl}|a/b|" "||" ""; do
+    if matches "$v" "<content-types>"; then echo "accepted <content-types>: [$v]"; fi
+  done
+  for v in GET "GET HEAD POST OPTIONS PUT PATCH DELETE VERSION-CONTROL"; do
+    matches "$v" "<methods>" || echo "refused <methods>: [$v]"
+  done
+  for v in "|application/json|" "|application/vnd.api+json| |application/x-amz-json-1.1| |text/plain|"; do
+    matches "$v" "<content-types>" || echo "refused <content-types>: [$v]"
+  done' 2>&1) || fail list_forms_strict "$OUT"
+expect_eq list_forms_strict "$OUT" ''
+
 # Header buffers smaller than nginx accepts are refused by the settings check (1k is the smallest size), not by nginx.
 OUT=$(docker run --rm -e EDGE_LARGE_HEADER_BUFFERS='4 1023' "$IMAGE" nginx -t 2>&1) && fail buffers_minimum "accepted: $OUT"
 grep -q "^ERROR: EDGE_LARGE_HEADER_BUFFERS=" <<<"$OUT" || fail buffers_minimum "not refused by the settings check: $OUT"
@@ -124,13 +145,17 @@ pass buffers_minimum
 OUT=$(docker run --rm -e EDGE_CLIENT_HEADER_TIMEOUT=5s -e EDGE_SEND_TIMEOUT=500ms -e EDGE_LARGE_HEADER_BUFFERS='2 8k' \
   -e MODSEC_ANOMALY_INBOUND=3 -e EDGE_KEEPALIVE_TIMEOUT=0 -e MODSEC_AUDIT_LOG=/var/tmp/audit.log \
   -e MODSEC_DENY_STATUS=406 -e MODSEC_PARANOIA=2 -e MODSEC_AUDIT_FORMAT=Native -e EDGE_BLOCK_PAGE=off \
+  -e MODSEC_REQ_BODY_NOFILES_LIMIT=65536 -e MODSEC_ARGUMENTS_LIMIT=500 -e 'MODSEC_ALLOWED_METHODS=POST GET' \
+  -e 'MODSEC_ALLOWED_REQUEST_CONTENT_TYPE=|application/json| |application/x-www-form-urlencoded|' \
   "$IMAGE" nginx -t 2>&1) || fail stricter_values_quiet "nginx -t failed: $OUT"
 expect_eq stricter_values_quiet "$(security_count "$OUT")" 0
 
 # Each weaker value prints exactly one SECURITY: line naming its variable (numbers, times and buffers compared).
 WEAK=(EDGE_CLIENT_HEADER_TIMEOUT=1m EDGE_CLIENT_BODY_TIMEOUT=11s EDGE_LARGE_HEADER_BUFFERS='4 16k'
   MODSEC_ANOMALY_INBOUND=6 MODSEC_ANOMALY_OUTBOUND=5 EDGE_KEEPALIVE_TIMEOUT=1h MODSEC_AUDIT_LOG=off
-  MODSEC_REQ_BODY_LIMIT=134217729 EDGE_HIDE_UPSTREAM_HEADERS=off)
+  MODSEC_REQ_BODY_LIMIT=134217729 EDGE_HIDE_UPSTREAM_HEADERS=off MODSEC_REQ_BODY_NOFILES_LIMIT=131073
+  MODSEC_ARGUMENTS_LIMIT=1001 'MODSEC_ALLOWED_METHODS=GET HEAD POST OPTIONS PUT'
+  'MODSEC_ALLOWED_REQUEST_CONTENT_TYPE=|application/json| |text/plain|')
 ARGS=(); for kv in "${WEAK[@]}"; do ARGS+=(-e "$kv"); done
 OUT=$(docker run --rm "${ARGS[@]}" -e EDGE_RATE_ZONES=off "$IMAGE" nginx -T 2>&1) || fail weaker_values_warn "nginx -T failed: $OUT"
 expect_eq weaker_values_warn_count "$(security_count "$OUT")" "${#WEAK[@]}"
@@ -170,6 +195,57 @@ for line in 'server_tokens off;' 'client_header_timeout 10s;' 'client_body_timeo
   grep -qxF "$line" <<<"$DUMP" || fail defaults_rendered "missing: $line"
 done
 expect_eq defaults_rendered "$(grep -c 'keepalive_timeout' <<<"$DUMP" || true)" 1
+
+# A proxy-wide conf.d file that sets one of the image's http-level directives: the image gives way (its line is
+# commented out), the file's value applies, and the start-up log says so. nginx-proxy's README example (my_proxy.conf)
+# is as strict as the default (NOTICE); bigger header buffers are weaker (SECURITY).
+mkdir -p "$WORK/proxy-wide" "$WORK/proxy-wide-weak" "$WORK/broken"
+printf 'server_tokens off;\nclient_max_body_size 100m;\n' > "$WORK/proxy-wide/my_proxy.conf"
+printf '# bigger buffers for large cookies\nlarge_client_header_buffers 4 32k;\n' > "$WORK/proxy-wide/buffers.conf"
+printf 'server_tokens on;\n' > "$WORK/proxy-wide-weak/tokens.conf"
+printf 'server_tokens off;\nthis_is_not_a_directive on;\n' > "$WORK/broken/broken.conf"
+chmod -R a+rX "$WORK/proxy-wide" "$WORK/proxy-wide-weak" "$WORK/broken"
+OUT=$(docker run --rm -v "$WORK/proxy-wide:/etc/nginx/conf.d:ro" "$IMAGE" nginx -T 2>&1) || fail proxy_wide_starts "nginx -T failed: $OUT"
+for line in 'server_tokens off;' 'large_client_header_buffers 4 32k;' 'client_max_body_size 100m;'; do
+  [ "$(grep -cxF "$line" <<<"$OUT" || true)" = 1 ] || fail proxy_wide_in_effect "not once in nginx -T: $line"
+done
+pass proxy_wide_in_effect
+expect_eq proxy_wide_image_lines_out "$(grep -cE '^(server_tokens|large_client_header_buffers) ' <<<"$OUT" || true)" 2
+expect_eq proxy_wide_notice "$(grep -c '^NOTICE: /etc/nginx/conf.d/my_proxy.conf:1 sets "server_tokens off" .*EDGE_SERVER_TOKENS=off' <<<"$OUT" || true)" 1
+expect_eq proxy_wide_weaker_buffers "$(grep -c '^SECURITY: /etc/nginx/conf.d/buffers.conf:2 sets "large_client_header_buffers 4 32k" .*EDGE_LARGE_HEADER_BUFFERS=4 8k, and that value is weaker' <<<"$OUT" || true)" 1
+expect_eq proxy_wide_lines_count "$(grep -cE '^(NOTICE|SECURITY):' <<<"$OUT" || true)" 2
+OUT=$(docker run --rm -v "$WORK/proxy-wide-weak:/etc/nginx/conf.d:ro" "$IMAGE" nginx -T 2>&1) || fail proxy_wide_weaker "nginx -T failed: $OUT"
+grep -qxF 'server_tokens on;' <<<"$OUT" || fail proxy_wide_weaker "server_tokens on is not in effect"
+expect_eq proxy_wide_weaker "$(grep -c '^SECURITY: /etc/nginx/conf.d/tokens.conf:1 sets "server_tokens on" .*EDGE_SERVER_TOKENS=off, and that value is weaker' <<<"$OUT" || true)" 1
+# Any other error is left to nginx: an unknown directive still stops the container, and so does a duplicate of a
+# directive the image does not set (sendfile is in the stock nginx.conf, as upstream).
+CONTAINERS+=("$RUN-broken")
+docker run -d --name "$RUN-broken" --network none -v "$WORK/broken:/etc/nginx/conf.d:ro" "$IMAGE" >/dev/null \
+  || fail proxy_wide_broken_stops "could not start the container"
+for _ in $(seq 1 50); do
+  [ "$(docker inspect -f '{{.State.Running}}' "$RUN-broken")" = false ] && break
+  sleep 0.2
+done
+CODE=$(docker inspect -f '{{.State.ExitCode}}' "$RUN-broken")
+LOGS=$(docker logs "$RUN-broken" 2>&1)
+[ "$(docker inspect -f '{{.State.Running}}' "$RUN-broken")" = false ] && [ "$CODE" != 0 ] \
+  && grep -q 'unknown directive "this_is_not_a_directive" in /etc/nginx/conf.d/broken.conf:2' <<<"$LOGS" \
+  && ! grep -qE '^(NOTICE|SECURITY):' <<<"$LOGS" \
+  && pass proxy_wide_broken_stops || fail proxy_wide_broken_stops "exit code $CODE, log: $LOGS"
+printf 'sendfile on;\n' > "$WORK/broken/broken.conf"
+OUT=$(docker run --rm -v "$WORK/broken:/etc/nginx/conf.d:ro" "$IMAGE" nginx -t 2>&1) && fail proxy_wide_other_duplicate "accepted: $OUT"
+grep -q '"sendfile" directive is duplicate in /etc/nginx/conf.d/broken.conf:1' <<<"$OUT" \
+  && pass proxy_wide_other_duplicate || fail proxy_wide_other_duplicate "$OUT"
+
+# A replaced nginx.conf without the image's includes still starts, but says that the WAF and the hardening are off.
+docker run --rm --entrypoint cat "$IMAGE" /etc/nginx/nginx.conf \
+  | grep -vE 'include /etc/nginx/(modsecurity-http|modsec/rendered/hardening)\.conf;' > "$WORK/nginx.conf"
+chmod 644 "$WORK/nginx.conf"
+OUT=$(docker run --rm -v "$WORK/nginx.conf:/etc/nginx/nginx.conf:ro" "$IMAGE" nginx -t 2>&1) \
+  || fail replaced_nginx_conf_warns "nginx -t failed: $OUT"
+grep -q '^SECURITY: the nginx configuration does not include /etc/nginx/modsecurity-http.conf' <<<"$OUT" \
+  && grep -q '^SECURITY: the nginx configuration does not include /etc/nginx/modsec/rendered/hardening.conf' <<<"$OUT" \
+  && pass replaced_nginx_conf_warns || fail replaced_nginx_conf_warns "$OUT"
 
 # ---- 2. live tests ------------------------------------------------------------------------------------------
 new_network() { # name subnet4
@@ -240,7 +316,27 @@ edge def
 edge weak -e MODSEC_RULE_ENGINE=DetectionOnly -e EDGE_SECURITY_HEADERS=off -e EDGE_SERVER_TOKENS=on
 edge plain -e EDGE_BLOCK_PAGE=off -e EDGE_HIDE_UPSTREAM_HEADERS=off
 edge custom -e MODSEC_DENY_STATUS=406 -v "$WORK/block-page.html:/etc/nginx/kickedro/block-page.html:ro"
-for e in def weak plain custom; do wait_ready "$RUN-$e"; done
+# The vhost of the other edges plus the proxy-wide files above, and a server that answers by itself.
+mkdir -p "$WORK/conf.d-proxy-wide"
+cp "$WORK/conf.d/test.conf" "$WORK/proxy-wide/my_proxy.conf" "$WORK/proxy-wide/buffers.conf" "$WORK/conf.d-proxy-wide/"
+printf 'server {\n    listen 80;\n    server_name local.example.com;\n    return 200 "local\\n";\n}\n' \
+  > "$WORK/conf.d-proxy-wide/local.conf"
+chmod -R a+rX "$WORK/conf.d-proxy-wide"
+start "$RUN-proxywide" -v "$WORK/conf.d-proxy-wide:/etc/nginx/conf.d:ro" "$IMAGE"
+for e in def weak plain custom proxywide; do wait_ready "$RUN-$e"; done
+
+# proxy_wide_live: the edge with nginx-proxy's my_proxy.conf and bigger header buffers in conf.d started, its log
+# names both files, and the file's buffers are in effect: a 16 KB header line passes there, the default 4 8k refuses it.
+LOGS=$(docker logs "$RUN-proxywide" 2>&1)
+grep -q '^NOTICE: /etc/nginx/conf.d/my_proxy.conf:1 sets "server_tokens off"' <<<"$LOGS" \
+  && grep -q '^SECURITY: /etc/nginx/conf.d/buffers.conf:2 sets "large_client_header_buffers 4 32k"' <<<"$LOGS" \
+  || fail proxy_wide_live_log "$LOGS"
+BIG_HEADER="X-Big: $(head -c 16000 /dev/zero | tr '\0' a)"
+big_header() { # edge -> status of a request with one 16 KB header line to local.example.com
+  docker exec "$CLIENT" curl -s -o /dev/null -w '%{http_code}' --max-time 10 -H 'Host: local.example.com' \
+    -H "$BIG_HEADER" "http://$1/" || true
+}
+expect_eq proxy_wide_live "$(big_header "$RUN-proxywide")|$(big_header "$RUN-def")" '200|400'
 
 # defaults_quiet: no SECURITY: line, the three security headers, no nginx version, backend headers hidden.
 LOGS=$(docker logs "$RUN-def" 2>&1)

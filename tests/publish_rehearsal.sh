@@ -3,13 +3,14 @@
 #   tests/publish_rehearsal.sh EDGE_ARCHIVE EDGE_IDENTITY GEN_ARCHIVE GEN_IDENTITY BUILD_KEY
 # *_ARCHIVE is `docker save` of a tested image, *_IDENTITY `scripts/publish_tested.sh identity` of it, BUILD_KEY
 # `scripts/build_key.sh`'s key. Runs the same scripts/publish_tested.sh steps as build.yml's publish job (decide,
-# push by digest with SBOM and provenance plus the same-bits check, tag) and the cases they must refuse. Signing and
+# release tag, push by digest with SBOM and provenance plus the same-bits check, tag, a second publish on the same day)
+# and the cases they must refuse. Signing and
 # the GitHub provenance attestation need GitHub's OIDC token, so they only run in the publish job itself.
 # BUILDKIT_IMAGE (required) is the BuildKit image the publish job uses, build.yml's pin, so the rehearsal runs the
 # BuildKit that publishes. The GEN_ARCHIVE image is loaded into Docker if it is not there yet (removed again after).
 # Prints "PASS <name>" per assertion and stops at the first failure. The registry container (and its volume), the
 # buildx builder, the images it creates and the temp files are removed on exit (also on failure). The registry listens
-# on 127.0.0.1 only, on $PORT_1 when set (devbox), else on a port Docker picks.
+# on 127.0.0.1 only, on PORT_1 when it is set, else on a port Docker picks.
 set -euo pipefail
 
 [ $# -eq 5 ] || { echo "usage: tests/publish_rehearsal.sh EDGE_ARCHIVE EDGE_IDENTITY GEN_ARCHIVE GEN_IDENTITY BUILD_KEY" >&2; exit 2; }
@@ -19,6 +20,8 @@ P="$ROOT/scripts/publish_tested.sh"
 # Distribution registry 3.1.2 (the registry:3 tag on 2026-11-13), pinned by digest.
 REGISTRY_IMAGE=registry@sha256:82f6ff4a7f982960c8aa51617fea3aabc485df6e55cce80d22deb1de36f1bc3c
 OTHER_KEY=sha256:$(printf '%064d' 0)
+# A release tag as build.yml makes it: the versions and the UTC date.
+BASE=1.31.8-modsec3.0.17-crs4.30.0-20261116
 BUILDKIT_IMAGE=${BUILDKIT_IMAGE:?set BUILDKIT_IMAGE to the BuildKit image pinned in .github/workflows/build.yml}
 
 RUN="pubtest-$$-$RANDOM"
@@ -54,8 +57,18 @@ decide() { "$P" decide "$@"; }   # its reasons go to stderr, into the log
 [ "$(decide "$KEY" 3 false false "$REG/edge" "$REG/gen")" = true ] || fail first_publish "no :latest yet must publish"
 pass decide_publishes_without_latest
 
-edge=$("$P" push "$EDGE_ARCHIVE" "$EDGE_ID" "$REG/edge" "$KEY")
-gen=$("$P" push "$GEN_ARCHIVE" "$GEN_ID" "$REG/gen" "$KEY")
+for r in edge gen; do
+  [ "$("$P" release-tag "$REG/$r" "$BASE")" = "$BASE" ] || fail release_tag "a free release tag must be used as it is"
+done
+pass release_tag_free_is_the_base
+if out=$("$P" release-tag "localhost:1/unreachable" "$BASE" 2>"$TMP/release.log"); then
+  fail release_tag_unknown "a tag was chosen although the registry could not be asked: '$out'"
+fi
+[ -z "$out" ] && grep -q 'cannot tell whether' "$TMP/release.log" || fail release_tag_unknown "$(cat "$TMP/release.log")"
+pass release_tag_refuses_to_guess
+
+edge=$("$P" push "$EDGE_ARCHIVE" "$EDGE_ID" "$REG/edge" "$KEY" "$BASE")
+gen=$("$P" push "$GEN_ARCHIVE" "$GEN_ID" "$REG/gen" "$KEY" "$BASE")
 [[ $edge =~ ^sha256:[0-9a-f]{64}$ && $gen =~ ^sha256:[0-9a-f]{64}$ ]] || fail push "digests: '$edge' '$gen'"
 pass push_by_digest_with_same_bits_check
 
@@ -70,8 +83,8 @@ for ref in "$REG/edge@$edge" "$REG/gen@$gen"; do
 done
 pass sbom_and_provenance_attached_without_event_payload
 
-"$P" tag "$REG/edge" "$edge" latest rehearsal-tag
-"$P" tag "$REG/gen" "$gen" latest rehearsal-tag
+"$P" tag "$REG/edge" "$edge" "$BASE" latest
+"$P" tag "$REG/gen" "$gen" "$BASE" latest
 pass tags_point_at_the_pushed_digests
 
 [ "$(decide "$KEY" 3 false false "$REG/edge" "$REG/gen")" = false ] || fail unchanged "same key on a weekday must skip"
@@ -96,16 +109,41 @@ done | sort -n | head -n 1)
   || fail overdue "7 days old must publish"
 pass decide_publishes_when_latest_is_overdue
 
-if "$P" check "$GEN_ID" "$REG/edge@$edge" "$KEY" 2>"$TMP/check.log"; then
+if "$P" check "$GEN_ID" "$REG/edge@$edge" "$KEY" "$BASE" 2>"$TMP/check.log"; then
   fail check_other_image "the edge image passed as the tested gen image"
 fi
 grep -q 'differs from the tested image' "$TMP/check.log" || fail check_other_image "$(cat "$TMP/check.log")"
-if "$P" check "$EDGE_ID" "$REG/edge@$edge" "$OTHER_KEY" 2>"$TMP/check.log"; then
+if "$P" check "$EDGE_ID" "$REG/edge@$edge" "$OTHER_KEY" "$BASE" 2>"$TMP/check.log"; then
   fail check_key "a wrong build key label passed"
 fi
-pass check_refuses_other_bits_and_other_key
+if "$P" check "$EDGE_ID" "$REG/edge@$edge" "$KEY" "$BASE.2" 2>"$TMP/check.log"; then
+  fail check_version "a wrong version label passed"
+fi
+grep -q 'version label' "$TMP/check.log" || fail check_version "$(cat "$TMP/check.log")"
+pass check_refuses_other_bits_key_and_version
 
-if "$P" push "$EDGE_ARCHIVE" "$GEN_ID" "$REG/mismatch" "$KEY" >"$TMP/push.out" 2>"$TMP/push.log"; then
+# A second publish on the same day: the dated tag is taken, so the release tag gets .2. latest moves to the new image,
+# the dated tag stays where it was and cannot be moved.
+next=$("$P" release-tag "$REG/gen" "$BASE")
+[ "$next" = "$BASE.2" ] || fail second_publish "release tag '$next', expected $BASE.2"
+gen2=$("$P" push "$GEN_ARCHIVE" "$GEN_ID" "$REG/gen" "$KEY" "$next")
+[ "$gen2" != "$gen" ] || fail second_publish "the second publish has the first one's digest"
+"$P" tag "$REG/gen" "$gen2" "$next" latest
+for t in "$BASE=$gen" "$BASE.2=$gen2" "latest=$gen2"; do
+  got=$(docker buildx imagetools inspect "$REG/gen:${t%%=*}" --format '{{json .Manifest}}' | jq -r .digest)
+  [ "$got" = "${t#*=}" ] || fail second_publish "gen:${t%%=*} is $got, expected ${t#*=}"
+done
+[ "$("$P" release-tag "$REG/gen" "$BASE")" = "$BASE.3" ] || fail second_publish "the third release tag must be $BASE.3"
+pass second_publish_same_day_gets_a_new_tag
+if "$P" tag "$REG/gen" "$gen2" "$BASE" 2>"$TMP/tag.log"; then
+  fail release_tag_never_moves "$BASE was moved to the second image"
+fi
+grep -q 'never moves' "$TMP/tag.log" || fail release_tag_never_moves "$(cat "$TMP/tag.log")"
+[ "$(docker buildx imagetools inspect "$REG/gen:$BASE" --format '{{json .Manifest}}' | jq -r .digest)" = "$gen" ] \
+  || fail release_tag_never_moves "$BASE moved"
+pass release_tag_never_moves
+
+if "$P" push "$EDGE_ARCHIVE" "$GEN_ID" "$REG/mismatch" "$KEY" "$BASE" >"$TMP/push.out" 2>"$TMP/push.log"; then
   fail push_mismatch "push succeeded although the archive is not the tested image"
 fi
 [ ! -s "$TMP/push.out" ] || fail push_mismatch "a digest was printed: $(cat "$TMP/push.out")"
@@ -133,7 +171,7 @@ cmp -s <(docker image inspect "$RUN-derived" | jq -S '.[0] | {Os, Architecture, 
        <(docker image inspect "$gen_ref" | jq -S '.[0] | {Os, Architecture, Config}') \
   || fail one_layer "test setup: the derived image's configuration differs"
 docker save "$RUN-derived" -o "$TMP/derived.tar"
-if "$P" push "$TMP/derived.tar" "$GEN_ID" "$REG/derived" "$KEY" >"$TMP/push.out" 2>"$TMP/push.log"; then
+if "$P" push "$TMP/derived.tar" "$GEN_ID" "$REG/derived" "$KEY" "$BASE" >"$TMP/push.out" 2>"$TMP/push.log"; then
   fail one_layer "push succeeded although one layer differs from the tested image"
 fi
 grep -q 'differs from the tested image' "$TMP/push.log" || fail one_layer "$(tail -n 5 "$TMP/push.log")"

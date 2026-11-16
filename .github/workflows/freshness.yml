@@ -3,6 +3,9 @@ name: freshness
 # Alarm for a pipeline that silently stopped: fails, and opens an "Image stale or behind upstream" issue (unless one
 # is open), when a published :latest is older than max_age_days (default 8: the build publishes at least every
 # Monday) or its nginx is older than upstream's current mainline; closes that issue once the images are healthy.
+# Alarm for nginx-proxy's template moving on: opens a "nginx-proxy template moved past the pin" issue when nginx-proxy's
+# main has had changes to the template for more than 7 days that the pin in pins.env does not have; closes it once the
+# pin has been moved (by hand, after review: docs/maintenance.md).
 on:
   schedule:
     - cron: "47 5 * * *"
@@ -58,36 +61,60 @@ jobs:
           python3 scripts/check_freshness.py --resolved "$RUNNER_TEMP/versions.env" --max-age-days "${MAX_AGE_DAYS:-8}" \
             "edge=$RUNNER_TEMP/edge-proxy.json" "gen=$RUNNER_TEMP/edge-proxy-gen.json" | tee -a "$GITHUB_STEP_SUMMARY"
 
-  # Any result of the check other than success opens the issue: a failure, and also a cancellation (how a job that
-  # hit its timeout-minutes ends). Only issues opened by this workflow's token (github-actions[bot]) count, so an issue
-  # anyone can open with the same title does not mute the alarm. Only fixed text and the run's URL go into the issue.
+  # nginx-proxy's main against NGINX_PROXY_REF (scripts/check_template_pin.py): fails when main has commits touching
+  # nginx.tmpl, app/ or Dockerfile.dockergen that the pin does not have, the oldest more than 7 days old. Read-only:
+  # public GitHub API, with the workflow's token for the rate limit.
+  template:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read # checkout
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Compare the nginx-proxy pin with upstream
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/check_template_pin.py | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # One issue per check. Any result of a check other than success opens its issue: a failure, and also a cancellation
+  # (how a job that hit its timeout-minutes ends); the run's log says which. Only issues opened by this workflow's
+  # token (github-actions[bot]) count, so an issue anyone can open with the same title does not mute the alarm. Only
+  # fixed text and the run's URL go into the issues.
   report:
-    needs: check
+    needs: [check, template]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
-      issues: write # open and close the "Image stale or behind upstream" issue
+      issues: write # open and close the two issues
     steps:
-      - name: Open or close the "Image stale or behind upstream" issue
+      - name: Open or close the issues
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RESULT: ${{ needs.check.result }}
+          CHECK_RESULT: ${{ needs.check.result }}
+          TEMPLATE_RESULT: ${{ needs.template.result }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          title="Image stale or behind upstream"
-          open=$(gh issue list --state open --author 'github-actions[bot]' --limit 200 --json number,title \
-            --jq ".[] | select(.title == \"$title\") | .number")
-          echo "check: $RESULT; open issue: ${open:-none}"
-          if [ "$RESULT" = success ]; then
-            for n in $open; do
-              gh issue close "$n" --comment "The freshness check passed again: $RUN_URL"
-            done
-          elif [ -z "$open" ]; then
-            gh issue create --title "$title" \
-              --body "The freshness check did not pass ($RESULT): $RUN_URL. It is closed by the next passing check."
-          fi
+          # issue TITLE RESULT WHAT: closes the open issue TITLE when RESULT is success, else opens it unless it is open.
+          issue() {
+            local title=$1 result=$2 what=$3 open n
+            open=$(gh issue list --state open --author 'github-actions[bot]' --limit 200 --json number,title \
+              --jq ".[] | select(.title == \"$title\") | .number")
+            echo "$what: $result; open issue: ${open:-none}"
+            if [ "$result" = success ]; then
+              for n in $open; do
+                gh issue close "$n" --comment "The $what passed again: $RUN_URL"
+              done
+            elif [ -z "$open" ]; then
+              gh issue create --title "$title" \
+                --body "The $what did not pass ($result): $RUN_URL. It is closed by the next passing check."
+            fi
+          }
+          issue "Image stale or behind upstream" "$CHECK_RESULT" "freshness check"
+          issue "nginx-proxy template moved past the pin" "$TEMPLATE_RESULT" "nginx-proxy template check"
 
   # Keep-alive (scheduled runs only): GitHub disables the scheduled workflows of a public repository after 60 days
   # without repository activity, which would stop the daily build and this alarm together, silently. This re-enables

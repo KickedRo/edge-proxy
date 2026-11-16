@@ -15,7 +15,8 @@
 # status). So nginx itself produced the response, and the match strings are exactly nginx's built-in page: a backend's
 # page with the same status, fresh or from a cache, is never touched. The page text is held in geo variables, whose
 # values nginx takes literally ($ is not interpreted), in pieces well below nginx's 4 KiB limit for one configuration
-# token. msie_padding is switched off, so Chrome and MSIE also get exactly the page.
+# token. msie_padding is switched off, so Chrome and MSIE also get exactly the page (unless a proxy-wide conf.d file
+# sets msie_padding: 90-kickedro-config-check.sh then comments the image's line out).
 set -eu
 
 custom=/etc/nginx/kickedro/block-page.html
