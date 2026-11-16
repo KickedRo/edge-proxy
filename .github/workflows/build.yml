@@ -13,12 +13,7 @@ on:
         required: false
         type: string
       force_publish:
-        description: "Publish even if the build key equals the one of :latest (on main only)."
-        required: false
-        default: false
-        type: boolean
-      force_skip_check:
-        description: "Treat today as not Monday: no weekly publish, only a changed build key publishes."
+        description: "Publish a new patch version even if the build key equals the one of :latest (on main only)."
         required: false
         default: false
         type: boolean
@@ -54,9 +49,7 @@ jobs:
     timeout-minutes: 10
     outputs:
       epoch: ${{ steps.date.outputs.epoch }}
-      weekday: ${{ steps.date.outputs.weekday }}
-      edge_tag: ${{ steps.date.outputs.edge_tag }}
-      gen_tag: ${{ steps.date.outputs.gen_tag }}
+      line: ${{ steps.line.outputs.line }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -67,29 +60,22 @@ jobs:
         run: python3 scripts/resolve_versions.py --out versions.env && cat versions.env
       # The UTC date, taken once so every job of the run agrees. SECURITY_EPOCH: build argument consumed only by
       # the security-upgrade layers of the images (apt upgrade, docker-gen's vulnerability-driven module upgrades),
-      # so they re-run once a day while the expensive layers (the ModSecurity compile) stay cached. The weekday
-      # (1 = Monday) drives the weekly publish; the tags are the day's release tags (the build's version label; the
-      # publish job adds .2, .3, ... when one is already taken).
-      - name: Date, security epoch and release tags
+      # so they re-run once a day while the expensive layers (the ModSecurity compile) stay cached.
+      - name: Security epoch
         id: date
         env:
           OVERRIDE: ${{ inputs.security_epoch }}
         run: |
-          today=$(date -u +%Y%m%d)
-          epoch="${OVERRIDE:-$today}"
+          epoch="${OVERRIDE:-$(date -u +%Y%m%d)}"
           case "$epoch" in *[!A-Za-z0-9._-]* | "") echo "bad security epoch" >&2; exit 1 ;; esac
-          get() { sed -n "s/^$1=//p" versions.env; }
-          edge_tag="$(get NGINX_VERSION)-modsec$(get MODSECURITY_VERSION | sed 's/^v//')-crs$(get CRS_VERSION | sed 's/^v//')-$today"
-          gen_tag="$(get DOCKER_GEN_VERSION | sed 's/^v//')-np$(get NGINX_PROXY_REF | cut -c1-12)-$today"
-          for tag in "$edge_tag" "$gen_tag"; do
-            [[ $tag =~ ^[0-9][A-Za-z0-9_.-]{0,127}$ ]] || { echo "bad release tag: $tag" >&2; exit 1; }
-          done
-          {
-            echo "epoch=$epoch"
-            echo "weekday=$(date -u +%u)"
-            echo "edge_tag=$edge_tag"
-            echo "gen_tag=$gen_tag"
-          } | tee -a "$GITHUB_OUTPUT"
+          echo "epoch=$epoch" | tee -a "$GITHUB_OUTPUT"
+      # The release line MAJOR.MINOR from VERSION, read here so that a malformed VERSION fails every run, pull
+      # requests included. The publish job adds the patch number when it publishes.
+      - name: Version line
+        id: line
+        run: |
+          line=$(scripts/publish_tested.sh line VERSION)
+          echo "line=$line" | tee -a "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: versions
@@ -112,21 +98,22 @@ jobs:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: versions
+      # The version label is LINE-dev here (the release version is not known before publishing); the publish job's
+      # push sets it to the version it publishes, X.Y.Z.
       - name: Build arguments and labels from the resolved versions
         id: args
         env:
           EPOCH: ${{ needs.resolve.outputs.epoch }}
-          EDGE_TAG: ${{ needs.resolve.outputs.edge_tag }}
-          GEN_TAG: ${{ needs.resolve.outputs.gen_tag }}
+          LINE: ${{ needs.resolve.outputs.line }}
           SOURCE: ${{ github.server_url }}/${{ github.repository }}
           REVISION: ${{ github.sha }}
         run: |
           versions=$(paste -sd';' versions.env)
-          labels() { # VERSION LICENSES
+          labels() { # LICENSES
             echo "org.opencontainers.image.source=$SOURCE"
             echo "org.opencontainers.image.revision=$REVISION"
-            echo "org.opencontainers.image.version=$1"
-            echo "org.opencontainers.image.licenses=$2"
+            echo "org.opencontainers.image.version=$LINE-dev"
+            echo "org.opencontainers.image.licenses=$1"
             echo "org.kickedro.versions=$versions"
           }
           {
@@ -139,10 +126,10 @@ jobs:
             echo "SECURITY_EPOCH=$EPOCH"
             echo 'EOF'
             echo 'edge_labels<<EOF'
-            labels "$EDGE_TAG" "MIT AND BSD-2-Clause AND Apache-2.0"
+            labels "MIT AND BSD-2-Clause AND Apache-2.0"
             echo 'EOF'
             echo 'gen_labels<<EOF'
-            labels "$GEN_TAG" "MIT"
+            labels "MIT"
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
 
@@ -268,8 +255,10 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  # Publishes the tested images, unchanged, when their content differs from :latest (build key), on Mondays, or on
-  # request. Only on main, never for pull requests, and only after build-test passed (smoke tests, Trivy gate).
+  # Publishes the tested images, unchanged, when their content differs from :latest (build key), when the VERSION
+  # line has no release yet, or on request, as the next version of that line (X.Y.Z, shared by both images). Only on
+  # main, never for pull requests, and only after build-test passed (smoke tests, Trivy gate). Outputs: published
+  # (true only when the images are pushed, signed, attested and tagged), version and the two pushed digests.
   publish:
     needs: [resolve, build-test]
     if: success() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
@@ -277,13 +266,19 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read # checkout
-      packages: write # read :latest's build key, push to ghcr.io, store signature and attestation there
+      packages: write # read :latest and version tags, push to ghcr.io, store signature and attestation there
       id-token: write # GitHub OIDC token for keyless cosign signing and the provenance attestation
       attestations: write # store the provenance attestation on GitHub
+    outputs:
+      published: ${{ steps.tag.outputs.published == 'true' }}
+      version: ${{ steps.version.outputs.version }}
+      edge_digest: ${{ steps.push.outputs.edge }}
+      gen_digest: ${{ steps.push.outputs.gen }}
     env:
       EDGE_REPOSITORY: ghcr.io/kickedro/edge-proxy
       GEN_REPOSITORY: ghcr.io/kickedro/edge-proxy-gen
       KEY: ${{ needs.build-test.outputs.key }}
+      LINE: ${{ needs.resolve.outputs.line }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -301,14 +296,21 @@ jobs:
           driver-opts: |
             image=${{ env.BUILDKIT_IMAGE }}
             provenance-add-gha=false
+      # The git release tags (vX.Y.Z) made so far, read from the repository on GitHub, not from the checkout (which
+      # has no tags). With the version labels of the :latest images they tell whether the VERSION line has a release
+      # and which patch comes next. A failed lookup fails the job: no list means no decision.
+      - name: Release tags so far
+        run: |
+          git ls-remote --tags --refs "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" 'refs/tags/v*' \
+            | sed 's#.*refs/tags/##' > "$RUNNER_TEMP/tags.txt"
+          echo "$(wc -l < "$RUNNER_TEMP/tags.txt") git tags v*:"
+          cat "$RUNNER_TEMP/tags.txt"
       - name: Publish or skip
         id: decide
         env:
-          WEEKDAY: ${{ needs.resolve.outputs.weekday }}
           FORCE_PUBLISH: ${{ inputs.force_publish == true }}
-          FORCE_SKIP_CHECK: ${{ inputs.force_skip_check == true }}
         run: |
-          publish=$(scripts/publish_tested.sh decide "$KEY" "$WEEKDAY" "$FORCE_PUBLISH" "$FORCE_SKIP_CHECK" \
+          publish=$(scripts/publish_tested.sh decide "$KEY" "$LINE" "$RUNNER_TEMP/tags.txt" "$FORCE_PUBLISH" \
             "$EDGE_REPOSITORY" "$GEN_REPOSITORY")
           echo "publish=$publish" >> "$GITHUB_OUTPUT"
           if [ "$publish" = false ]; then
@@ -329,31 +331,27 @@ jobs:
           printf '%s\n' "$SUMS" > "$RUNNER_TEMP/SHA256SUMS"
           [ "$(wc -l < "$RUNNER_TEMP/SHA256SUMS")" = 4 ] || { echo "expected 4 checksums from build-test" >&2; exit 1; }
           sha256sum --strict -c "$RUNNER_TEMP/SHA256SUMS"
-      # The release tags of this publish, looked up in the registry now: the day's tag from the resolve job, or the
-      # next free .2, .3, ... when it is taken (a published release tag never moves). The images get them as their
-      # version label.
-      - name: Release tags
-        id: release
+      # The version of this publish, computed now (not when the pull request was tested): the next patch of the
+      # VERSION line after its releases (git tags, :latest version labels), skipping any version either repository
+      # already has as a tag, so a version is never re-used; LINE.0 for a line without a release. The images get it
+      # as their version label and their version tag.
+      - name: Version
+        id: version
         if: steps.decide.outputs.publish == 'true'
-        env:
-          EDGE_TAG: ${{ needs.resolve.outputs.edge_tag }}
-          GEN_TAG: ${{ needs.resolve.outputs.gen_tag }}
         run: |
-          edge=$(scripts/publish_tested.sh release-tag "$EDGE_REPOSITORY" "$EDGE_TAG")
-          gen=$(scripts/publish_tested.sh release-tag "$GEN_REPOSITORY" "$GEN_TAG")
-          echo "edge=$edge" >> "$GITHUB_OUTPUT"
-          echo "gen=$gen" >> "$GITHUB_OUTPUT"
+          version=$(scripts/publish_tested.sh next-version "$LINE" "$RUNNER_TEMP/tags.txt" \
+            "$EDGE_REPOSITORY" "$GEN_REPOSITORY")
+          echo "version=$version" | tee -a "$GITHUB_OUTPUT"
       - name: Push by digest, with SBOM and provenance; same-bits check
         id: push
         if: steps.decide.outputs.publish == 'true'
         env:
           PROVENANCE_BUILDER_ID: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          EDGE_TAG: ${{ steps.release.outputs.edge }}
-          GEN_TAG: ${{ steps.release.outputs.gen }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           t="$RUNNER_TEMP/tested"
-          edge=$(scripts/publish_tested.sh push "$t/edge.tar" "$t/edge.json" "$EDGE_REPOSITORY" "$KEY" "$EDGE_TAG")
-          gen=$(scripts/publish_tested.sh push "$t/gen.tar" "$t/gen.json" "$GEN_REPOSITORY" "$KEY" "$GEN_TAG")
+          edge=$(scripts/publish_tested.sh push "$t/edge.tar" "$t/edge.json" "$EDGE_REPOSITORY" "$KEY" "$VERSION")
+          gen=$(scripts/publish_tested.sh push "$t/gen.tar" "$t/gen.json" "$GEN_REPOSITORY" "$KEY" "$VERSION")
           echo "edge=$edge" >> "$GITHUB_OUTPUT"
           echo "gen=$gen" >> "$GITHUB_OUTPUT"
       - if: steps.decide.outputs.publish == 'true'
@@ -386,22 +384,23 @@ jobs:
           push-to-registry: true
           # Storage records (the organization's "Linked Artifacts" page) would need artifact-metadata: write.
           create-storage-record: false
-      # Tags last: :latest moves only to images that passed the same-bits check and are signed and attested. The
-      # release tags are new (publish_tested.sh refuses to move one).
+      # Tags last: :latest and the line's MAJOR.MINOR tag move only to images that passed the same-bits check and are
+      # signed and attested. The version tag X.Y.Z is new (publish_tested.sh refuses to move one).
       - name: Tag
+        id: tag
         if: steps.decide.outputs.publish == 'true'
         env:
           EDGE_DIGEST: ${{ steps.push.outputs.edge }}
           GEN_DIGEST: ${{ steps.push.outputs.gen }}
-          EDGE_TAG: ${{ steps.release.outputs.edge }}
-          GEN_TAG: ${{ steps.release.outputs.gen }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          scripts/publish_tested.sh tag "$EDGE_REPOSITORY" "$EDGE_DIGEST" "$EDGE_TAG" latest
-          scripts/publish_tested.sh tag "$GEN_REPOSITORY" "$GEN_DIGEST" "$GEN_TAG" latest
+          scripts/publish_tested.sh tag "$EDGE_REPOSITORY" "$EDGE_DIGEST" "$VERSION" "${VERSION%.*}" latest
+          scripts/publish_tested.sh tag "$GEN_REPOSITORY" "$GEN_DIGEST" "$VERSION" "${VERSION%.*}" latest
+          echo "published=true" >> "$GITHUB_OUTPUT"
           {
-            echo "published (build key \`$KEY\`):"
-            echo "- \`$EDGE_REPOSITORY:$EDGE_TAG\`, \`latest\`: \`$EDGE_DIGEST\`"
-            echo "- \`$GEN_REPOSITORY:$GEN_TAG\`, \`latest\`: \`$GEN_DIGEST\`"
+            echo "published version \`$VERSION\` (build key \`$KEY\`), tags \`$VERSION\`, \`${VERSION%.*}\`, \`latest\`:"
+            echo "- \`$EDGE_REPOSITORY@$EDGE_DIGEST\`"
+            echo "- \`$GEN_REPOSITORY@$GEN_DIGEST\`"
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
   # A failed scheduled run opens a "Build failed" issue (unless the workflow already has one open); the next
