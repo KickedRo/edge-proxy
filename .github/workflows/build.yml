@@ -425,7 +425,7 @@ jobs:
           name: release-manifest
           path: ${{ runner.temp }}/release/manifest.json
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 90 # the most a public repository allows; a release job re-run needs it (docs/maintenance.md)
           overwrite: true
       # Tags last: :latest and the line's MAJOR.MINOR tag move only to images that passed the same-bits check and are
       # signed and attested. The version tag X.Y.Z is new (publish_tested.sh refuses to move one).

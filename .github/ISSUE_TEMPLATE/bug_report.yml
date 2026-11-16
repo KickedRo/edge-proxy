@@ -1,0 +1,73 @@
+name: Bug report
+description: Something in the edge or gen image, or in this repository, does not work as documented.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for the report. **A security vulnerability does not go here:** report it privately, see
+        [SECURITY.md](https://github.com/KickedRo/edge-proxy/blob/main/SECURITY.md).
+
+        Before you paste anything, remove what is sensitive: your host names and addresses (use `example.com`),
+        cookies, `Authorization` headers, tokens and request bodies.
+
+        A request that the WAF blocks is not always a bug. Check
+        [what the WAF lets through by default](https://github.com/KickedRo/edge-proxy/blob/main/docs/configuration.md#what-the-waf-lets-through-by-default)
+        first.
+  - type: textarea
+    id: version
+    attributes:
+      label: Image version and digests
+      description: |
+        The version and digest of both images you run. With the container names of `examples/docker-compose.yml`:
+        `for c in nginx-proxy nginx-proxy-gen; do docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}} {{json .RepoDigests}}' "$(docker inspect --format '{{.Image}}' "$c")"; done`
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened, and what you expected
+      description: What you did, what you saw, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: The smallest set of steps that shows the problem, for example a `curl` command against `app.example.com`.
+  - type: textarea
+    id: compose
+    attributes:
+      label: Compose excerpt
+      description: The `edge` and `gen` services (and acme-companion, if it is involved), with the environment variables you set and the files you mount.
+      render: yaml
+  - type: textarea
+    id: startup
+    attributes:
+      label: Start-up lines of edge
+      description: |
+        The first lines `edge` logs when it starts (`docker logs nginx-proxy 2>&1 | head -n 100`), with every `SECURITY:` and `NOTICE:` line.
+      render: text
+  - type: textarea
+    id: audit
+    attributes:
+      label: Rule IDs from the audit log
+      description: |
+        For a blocked request: the rule IDs, messages and the matched variable of its audit log entry. Not the whole
+        entry: it holds the request headers, including cookies and `Authorization`.
+      render: text
+  - type: input
+    id: docker
+    attributes:
+      label: Docker
+      description: "`docker version --format '{{.Server.Version}}'`, rootful or rootless, and the host's operating system."
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before you submit
+      options:
+        - label: I removed host names, addresses, cookies, tokens and other sensitive data from what I pasted.
+          required: true
+        - label: This is not a security vulnerability (those go to private vulnerability reporting).
+          required: true

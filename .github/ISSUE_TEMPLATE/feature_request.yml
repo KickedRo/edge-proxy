@@ -1,0 +1,52 @@
+name: Feature request
+description: Suggest a new setting, a changed default or another change. Open this before a pull request that adds surface.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for the idea. Please read
+        [CONTRIBUTING.md](https://github.com/KickedRo/edge-proxy/blob/main/CONTRIBUTING.md) first: this project is
+        maintained for its maintainers' own use, and a request can be declined even when it is a good idea.
+
+        Anything that adds a setting, a mount point or other surface is agreed on here before a pull request.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - edge image (nginx, WAF, hardening)
+        - gen image (docker-gen, template)
+        - both images
+        - build and release pipeline
+        - documentation
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you are trying to do, and what stops you today. Describe the traffic, the application or the setup, not only the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you propose
+      description: |
+        The change you would like. For a new setting: its name, its default, its allowed values, and what a user loses
+        by weakening it (every setting needs that sentence, see docs/settings.md).
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you tried instead
+      description: An existing setting, a rule in `custom.d`, a `vhost.d` snippet, a `conf.d` file, a CRS plugin. Why it is not enough.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before you submit
+      options:
+        - label: I checked the settings table and the configuration guide, and this is not possible with what they describe.
+          required: true
