@@ -328,6 +328,12 @@ jobs:
           if [ "$publish" = false ]; then
             echo "unchanged, skipped" | tee -a "$GITHUB_STEP_SUMMARY"
           fi
+      # A run that publishes nothing still requires the version the :latest images carry to have its Release (its git
+      # tag vX.Y.Z, which publishing the Release creates). A release job that failed leaves none: this keeps the run
+      # red, and the "Build failed" issue open, until that job is re-run (no repair here; docs/maintenance.md).
+      - name: The published version has its Release
+        if: steps.decide.outputs.publish == 'false'
+        run: scripts/publish_tested.sh released "$RUNNER_TEMP/tags.txt" "$EDGE_REPOSITORY" "$GEN_REPOSITORY"
 
       - if: steps.decide.outputs.publish == 'true'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2

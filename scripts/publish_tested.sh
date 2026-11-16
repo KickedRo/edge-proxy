@@ -31,6 +31,13 @@
 #     those versions is on a higher MAJOR.MINOR than LINE (VERSION must not go back), or when the registry cannot
 #     tell whether a :latest or a tag exists.
 #
+#   scripts/publish_tested.sh released TAGS_FILE REPOSITORY...
+#     For a run that publishes nothing: the version each REPOSITORY's :latest carries (its version label, when it is
+#     MAJOR.MINOR.PATCH) must have its git tag vMAJOR.MINOR.PATCH in TAGS_FILE (as for next-version), which only
+#     publishing its GitHub Release creates (a draft has none). Fails otherwise, with "Release vX.Y.Z is missing: ..."
+#     once per missing version, so the run stays red until the failed release job is re-run. Other labels (the
+#     date-based tags from before versions) and a missing :latest are not checked. Fails when the registry cannot tell.
+#
 #   scripts/publish_tested.sh push ARCHIVE TESTED_IDENTITY REPOSITORY KEY RELEASE_TAG
 #     Publishes the tested image without rebuilding it. ARCHIVE is `docker save` of the tested image (an OCI image
 #     layout since Docker 25); a one-line Dockerfile `FROM tested`, with the archive as the named build context
@@ -221,6 +228,39 @@ next_version() {
   die "no free version from $line.$first to $line.$((first + 99))"
 }
 
+in_list() { # VALUE ITEM...: VALUE is one of the ITEMs
+  local value=$1 item
+  shift
+  for item in "$@"; do
+    if [ "$item" = "$value" ]; then return 0; fi
+  done
+  return 1
+}
+
+released() {
+  [ $# -ge 2 ] || usage
+  local tags=$1 repo version out
+  local tagged=() missing=()
+  shift
+  out=$(tag_versions "$tags") || exit 1
+  [ -z "$out" ] || mapfile -t tagged <<<"$out"
+  for repo in "$@"; do
+    version=$(latest_version "$repo") || exit 1 # the registry could not tell: never guess
+    if [[ ! $version =~ $VERSION_RE ]]; then
+      echo "not checked: $repo:latest has no MAJOR.MINOR.PATCH version label ('$version')" >&2
+    elif in_list "$version" "${tagged[@]}"; then
+      echo "released: $repo:latest is $version, which has its git tag v$version" >&2
+    elif ! in_list "$version" "${missing[@]}"; then
+      missing+=("$version")
+    fi
+  done
+  for version in "${missing[@]}"; do
+    echo "publish_tested: Release v$version is missing: re-run the failed release job of the run that published it" \
+      "(see docs/maintenance.md)" >&2
+  done
+  [ ${#missing[@]} -eq 0 ] || exit 1
+}
+
 image_manifest() { # LAYOUT_DIR: digest of the single image manifest in an OCI layout of one image
   local dir=$1 top type
   [ "$(jq '.manifests | length' "$dir/index.json")" = 1 ] || die "expected exactly one image in the archive"
@@ -313,6 +353,7 @@ case "$cmd" in
   line) version_line "$@" ;;
   decide) decide "$@" ;;
   next-version) next_version "$@" ;;
+  released) released "$@" ;;
   push) push "$@" ;;
   check) check "$@" ;;
   tag) tag "$@" ;;

@@ -3,11 +3,12 @@
 #   tests/publish_rehearsal.sh EDGE_ARCHIVE EDGE_IDENTITY GEN_ARCHIVE GEN_IDENTITY BUILD_KEY
 # *_ARCHIVE is `docker save` of a tested image, *_IDENTITY `scripts/publish_tested.sh identity` of it, BUILD_KEY
 # `scripts/build_key.sh`'s key. Runs the same scripts/publish_tested.sh steps as build.yml's publish job (VERSION line,
-# decide, next version, push by digest with SBOM and provenance plus the same-bits check, tag, a second publish that
-# becomes the next patch) and the cases they must refuse. The git release tags the publish job reads with
-# `git ls-remote` are stub files here (one tag per line); registry states the two published images do not reach
-# (a `latest` of another line, a version only the registry has) are label-only stub images. Signing and the GitHub
-# provenance attestation need GitHub's OIDC token, so they only run in the publish job itself.
+# decide, next version, push by digest with SBOM and provenance plus the same-bits check, tag, the released check of a
+# run that publishes nothing, a second publish that becomes the next patch) and the cases they must refuse. The git
+# release tags the publish job reads with `git ls-remote` are stub files here (one tag per line); registry states the
+# two published images do not reach (a `latest` of another line, a version only the registry has, a label from before
+# versions) are label-only stub images. Signing and the GitHub provenance attestation need GitHub's OIDC token, so
+# they only run in the publish job itself.
 # BUILDKIT_IMAGE (required) is the BuildKit image the publish job uses, build.yml's pin, so the rehearsal runs the
 # BuildKit that publishes. The GEN_ARCHIVE image is loaded into Docker if it is not there yet (removed again after).
 # Prints "PASS <name>" per assertion and stops at the first failure. The registry container (and its volume), the
@@ -139,6 +140,31 @@ tags "$TMP/tags" v0.1.0
 [ "$(decide "$KEY" 0.1 "$TMP/tags" false "$REG/edge" "$REG/gen")" = false ] \
   || fail decide_skips_unchanged "same key, released line must skip"
 pass decide_skips_unchanged
+# A run that publishes nothing checks that the version the :latest images carry has its Release, i.e. its git tag
+# (publishing the Release creates it): a release job that failed leaves none, and the run must stay red.
+"$P" released "$TMP/tags" "$REG/edge" "$REG/gen" 2>"$TMP/released.log" \
+  || fail released_ok "v0.1.0 is tagged: $(cat "$TMP/released.log")"
+pass released_ok
+tags "$TMP/tags" v0.0.9 v0.1.0-rc1 0.1.0 # a draft of v0.1.0 has no git tag either
+if "$P" released "$TMP/tags" "$REG/edge" "$REG/gen" 2>"$TMP/released.log"; then
+  fail released_refuses_missing_tag "passed without the git tag v0.1.0"
+fi
+grep -qF 'Release v0.1.0 is missing: re-run the failed release job of the run that published it' \
+  "$TMP/released.log" || fail released_refuses_missing_tag "$(cat "$TMP/released.log")"
+[ "$(grep -c 'is missing' "$TMP/released.log")" = 1 ] \
+  || fail released_refuses_missing_tag "one message per missing version: $(cat "$TMP/released.log")"
+pass released_refuses_missing_tag
+# Labels from before versions (the date-based tags) and a repository without :latest are not checked.
+stub "$REG/legacy:latest" "$KEY" 1.31.8-modsec3.0.17-crs4.30.0-20261116.3
+"$P" released "$TMP/no-tags" "$REG/legacy" "$REG/no-latest" 2>"$TMP/released.log" \
+  || fail released_ignores_legacy_labels "$(cat "$TMP/released.log")"
+pass released_ignores_legacy_labels
+if "$P" released "$TMP/tags" "localhost:1/unreachable" 2>"$TMP/released.log"; then
+  fail released_refuses_to_guess "passed although the registry could not be asked"
+fi
+grep -q 'cannot tell whether' "$TMP/released.log" || fail released_refuses_to_guess "$(cat "$TMP/released.log")"
+pass released_refuses_to_guess
+tags "$TMP/tags" v0.1.0
 [ "$(decide "$OTHER_KEY" 0.1 "$TMP/tags" false "$REG/edge" "$REG/gen")" = true ] \
   || fail decide_publishes_a_changed_key "another key must publish"
 pass decide_publishes_a_changed_key
