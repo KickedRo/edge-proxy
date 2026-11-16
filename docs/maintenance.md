@@ -127,10 +127,16 @@ So the issue stays open, and after a failed push run the next scheduled run open
 2. Use **Re-run failed jobs** on that run, **within 30 days** of it: GitHub does not re-run older runs. The re-run
    release job uses the publish job's outputs, which a re-run keeps, and the run's `release-manifest` artifact (kept
    for those 30 days). It is idempotent: it creates what is missing (the draft, the asset, the publication and with it
-   the git tag) and leaves alone what exists and matches.
+   the git tag) and leaves alone what exists and matches. **Not "Re-run all jobs"**: that rebuilds the images,
+   publishes nothing (the content is already published), fails at "The published version has its Release", and
+   likely discards the earlier attempt's `release-manifest` artifact, so the release job can no longer be finished.
+   Then only `force_publish` is left (see "After 30 days" below).
 3. If it stops on something that exists but differs (a tag on another commit, another `manifest.json`, an upload
    that did not complete, several drafts for one tag), it changes nothing and says what it found. Fix that by hand as
    the message says (for example delete the extra draft, or the incomplete asset of the draft), then re-run again.
+   A git tag `vX.Y.Z` on another commit cannot be fixed by hand: the `v*` tag ruleset
+   ([going-public.md](going-public.md#still-to-do)) forbids moving or deleting it. Leave it, and publish a new patch
+   instead: run `build.yml` on `main` by hand with `force_publish`. `X.Y.Z` stays without a Release.
 4. The "Build failed" issue closes with the next passing scheduled run.
 
 **After 30 days** the run can no longer be re-run. Publish a new patch instead: run `build.yml` on `main` by hand
@@ -147,6 +153,12 @@ the next run) publishes the same version number. If it failed between tagging `e
 tag `X.Y.N` (and `X.Y` and `latest` point to it) while `gen` does not, and there is no git tag or Release. The next
 publish, a re-run or the next run, publishes `X.Y.N+1` for both images: numbers are never re-used. The `edge` tag
 `X.Y.N` stays behind without a Release; leave it.
+
+One case ends differently: a `force_publish` run that failed between tagging `edge` and tagging `gen`. Its content
+equals `latest`'s, so the next runs publish nothing and fail at "The published version has its Release" for `X.Y.N`,
+with "only some :latest images carry it". No release job ran for `X.Y.N`, so there is no release job to re-run:
+re-run the failed publish job of that run (**Re-run failed jobs**, within 30 days), or run `force_publish` again.
+Either publishes `X.Y.N+1` for both images, with its Release.
 
 ### The tag lookup needs a public repository
 
@@ -166,6 +178,17 @@ needs the job's token.
 - the nginx of a published `latest` is older than upstream's current mainline (`BEHIND`).
 
 It is independent of the build workflow, so it also catches a build that silently stopped.
+
+**`STALE` while the daily builds are green**: the content has really not changed for 30 days (no upstream release,
+no Debian security update). Either run `build.yml` on `main` by hand with `force_publish` (a new patch of the same
+content, as a new image, which resets the age), or first check that nothing changed upstream or in Debian that the
+build should have picked up, and then raise the limit: the `30` in `freshness.yml` for the daily check, or the
+`max_age_days` input for a manual run.
+
+**A cancelled scheduled build** counts as not succeeded (`BUILD:`). Runs on `main` take turns: a run waiting for its
+turn is cancelled when another one is queued behind it. So when two pushes to `main` come close together around
+03:17 UTC, the scheduled build can be cancelled while it waits, and the next check (05:47 UTC) opens the issue.
+Nothing to do: the next day's scheduled build passes, and the check after it closes the issue.
 
 ## Scheduled workflows stop after 60 days
 

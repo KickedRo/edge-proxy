@@ -320,6 +320,8 @@ for setup in tag-only published; do
   before=$(snapshot)
   run 0.1.0 "$A" "$M" "$NOTES"
   refused "refuses_tag_at_other_commit ($setup)" "$B"
+  grep -qF "publish a new patch version instead, with a manual run of build.yml on main with force_publish" "$TMP/err" \
+    || fail "refuses_tag_at_other_commit ($setup)" "the message does not name the remedy"
   calls_are "refuses_tag_at_other_commit ($setup)" "get-tag v0.1.0"
   [ "$(snapshot)" = "$before" ] || fail "refuses_tag_at_other_commit ($setup)" "the repository state changed"
 done

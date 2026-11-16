@@ -134,7 +134,9 @@ inspect() { # reads the state of the Release $TAG into TAG_AT, REL_ID, REL_DRAFT
   local out n=0 tag id draft asset target
   TAG_AT=$(tag_commit "$TAG") || exit 1
   [ -z "$TAG_AT" ] || [ "$TAG_AT" = "$COMMIT" ] \
-    || die "the tag $TAG is on commit $TAG_AT, not on $COMMIT (a version tag never moves)"
+    || die "the tag $TAG is on commit $TAG_AT, not on $COMMIT. A version tag is never moved or deleted (the v* tag" \
+      "ruleset forbids it): leave it, and publish a new patch version instead, with a manual run of build.yml on main" \
+      "with force_publish (see docs/maintenance.md)"
   out=$(releases) || die "cannot list the Releases of $GH_REPO"
   REL_ID='' REL_DRAFT='' REL_ASSET='' NEWER=''
   while IFS=$'\t' read -r tag id draft asset target; do
