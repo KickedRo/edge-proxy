@@ -1,6 +1,12 @@
 ## Changes in this repository
 
+### What's Changed
 * Add a thing by @someone in #1
+
+### New Contributors
+* @someone made their first contribution in #1
+
+**Full Changelog**: https://github.com/KickedRo/edge-proxy/commits/v0.1.0
 
 ## Upstream
 

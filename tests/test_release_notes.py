@@ -180,10 +180,15 @@ class NotesTest(Base):
         return d
 
     def test_notes_first_release_lists_everything(self):
-        text, _ = self.notes(self.current("0.1.0"), "--prs", self.write("prs.md", "* Add a thing by @someone in #1"))
+        prs = ("## What's Changed\n* Add a thing by @someone in #1\n\n## New Contributors\n"
+               "* @someone made their first contribution in #1\n\n"
+               "**Full Changelog**: https://github.com/KickedRo/edge-proxy/commits/v0.1.0\n")  # as generate-notes
+        text, _ = self.notes(self.current("0.1.0"), "--prs", self.write("prs.md", prs))
         self.assertIn("First versioned release", text)
         self.assertNotIn("→", text)  # nothing to compare with
         self.assertIn("* Add a thing by @someone in #1", text)
+        self.assertIn("\n### What's Changed\n", text)  # one level below "## Changes in this repository"
+        self.assertNotIn("\n## What's Changed", text)
         # sections in order
         order = [text.index(h) for h in ("## Changes in this repository", "## Upstream", "## Packages", "## Images")]
         self.assertEqual(order, sorted(order))
@@ -224,6 +229,23 @@ class NotesTest(Base):
         self.assertNotIn("`ca-certificates`", text)  # unchanged packages stay out of the diff
         self.assertNotIn("<details>", text)  # short lists are not folded
         self.assertEqual(text, self.read(self.fixture("notes-diff.expected.md")))
+
+    def test_notes_demote_the_headings_of_the_prs_text(self):
+        prs = ("# Title\n## What's Changed\n* Add a thing by @someone in #1\n### Sub\n#### Four\n##### Five\n"
+               "###### Six stays\n####### not a heading\n#hashtag\n#\n   ## Indented\n    ## indented code\n"
+               "* a list item with # a hash sign\n"
+               "```sh\n## in a code block\n```\n"
+               "~~~~\n# in a tilde block\n~~~\n```\n~~~~\n## After the blocks\n\n"
+               "**Full Changelog**: https://github.com/KickedRo/edge-proxy/compare/v0.1.0...v0.1.1\n")
+        want = ("## Title\n### What's Changed\n* Add a thing by @someone in #1\n#### Sub\n##### Four\n###### Five\n"
+                "###### Six stays\n####### not a heading\n#hashtag\n##\n   ### Indented\n    ## indented code\n"
+                "* a list item with # a hash sign\n"
+                "```sh\n## in a code block\n```\n"
+                "~~~~\n# in a tilde block\n~~~\n```\n~~~~\n### After the blocks\n\n"
+                "**Full Changelog**: https://github.com/KickedRo/edge-proxy/compare/v0.1.0...v0.1.1\n")
+        text, _ = self.notes(self.current(), "--prs", self.write("prs.md", prs))
+        section = text.split("## Changes in this repository\n\n", 1)[1].split("\n## Upstream\n", 1)[0]
+        self.assertEqual(section, want)
 
     def test_notes_unchanged_repository_says_rebuild(self):
         prev = self.manifest(self.contents_data(), "0.1.0", "previous.json")

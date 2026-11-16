@@ -17,9 +17,10 @@ manifest: contents plus schema, version, commit, build key and the digests of th
 bytes (sorted keys, no timestamps), so a re-run can be compared byte for byte.
 notes: Markdown release notes from a manifest; with --previous (the manifest of the previous release) it lists what
 changed, without it every list is complete. --prs is Markdown for "Changes in this repository" (default: a rebuild
-note). For a minor release (X.Y.0) with --changelog, the "> **Upgrading:**" block of its "## [X.Y.0]" section and a
-link to that section come first; a missing file or section only prints a warning on stderr. Notes never exceed
-100000 characters: past that, the package lists give way to a pointer to the manifest.
+note); its headings are demoted one level (## → ###) to sit below that section's heading. For a minor release
+(X.Y.0) with --changelog, the "> **Upgrading:**" block of its "## [X.Y.0]" section and a link to that section come
+first; a missing file or section only prints a warning on stderr. Notes never exceed 100000 characters: past that,
+the package lists give way to a pointer to the manifest.
 Exit 0 on success, 2 on unusable input (unreadable or malformed file, missing section, bad argument), with a one-line
 message on stderr.
 """
@@ -329,12 +330,33 @@ def upgrading_block(changelog_path, version):
     return ("\n".join(block) + "\n\n" if block else "") + link + "\n"
 
 
+FENCE = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
+HEADING = re.compile(r"^( {0,3})(#{1,5})(?=[ \t]|$)")
+
+
+def demote_headings(text):
+    """Every ATX heading one level lower (# → ##, ## → ###, ...; ###### stays), so a Markdown text (GitHub's
+    generated notes) sits below the section heading it is put under. Fenced code blocks are left as they are."""
+    out, fence = [], None
+    for line in text.split("\n"):
+        m = FENCE.fullmatch(line)
+        if fence is None:
+            if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):  # an opening fence (CommonMark)
+                fence = m.group(1)
+            else:
+                line = HEADING.sub(r"\1\2#", line, count=1)
+        elif m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence) and not m.group(2).strip():
+            fence = None  # the closing fence: same character, at least as long, nothing after it
+        out.append(line)
+    return "\n".join(out)
+
+
 def build_notes(m, prev, prs, changelog, capped):
     parts = []
     version = m["version"]
     if changelog and version.endswith(".0"):
         parts.append(upgrading_block(changelog, version))
-    prs = (prs or "").strip()
+    prs = demote_headings((prs or "").strip())
     parts.append("## Changes in this repository\n\n" + (prs if prs else "None: a rebuild for upstream and security updates.") + "\n")
     parts.append(upstream_section(m, prev))
     if capped:
