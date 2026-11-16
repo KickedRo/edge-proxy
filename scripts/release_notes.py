@@ -16,10 +16,13 @@ with the replacement's version.
 manifest: contents plus schema, version, commit, build key and the digests of the images. Same inputs give the same
 bytes (sorted keys, no timestamps), so a re-run can be compared byte for byte.
 notes: Markdown release notes from a manifest; with --previous (the manifest of the previous release) it lists what
-changed, without it every list is complete. --prs is Markdown for "Changes in this repository" (default: a rebuild
-note); its headings are demoted one level (## → ###) to sit below that section's heading. For a minor release
-(X.Y.0) with --changelog, the "> **Upgrading:**" block of its "## [X.Y.0]" section and a link to that section come
-first; a missing file or section only prints a warning on stderr. Notes never exceed 100000 characters: past that,
+changed, without it every list is complete. --prs is GitHub's generated notes (Markdown) for "Changes in this
+repository", without the authors' @-mentions: " by @login" is removed from each pull request line ("* title by @login
+in URL") and the "New Contributors" section is dropped; the pull request links stay. Its headings are demoted one
+level (## → ###) to sit below that section's heading. When it lists no pull request (no "* " or "- " line), the
+section starts with a rebuild note, which is also all it says without --prs. For a minor release (X.Y.0) with
+--changelog, the "> **Upgrading:**" block of its "## [X.Y.0]" section and a link to that section come first; a
+missing file or section only prints a warning on stderr. Notes never exceed 100000 characters: past that,
 the package lists give way to a pointer to the manifest.
 Exit 0 on success, 2 on unusable input (unreadable or malformed file, missing section, bad argument), with a one-line
 message on stderr.
@@ -330,8 +333,42 @@ def upgrading_block(changelog_path, version):
     return ("\n".join(block) + "\n\n" if block else "") + link + "\n"
 
 
+REBUILD = "None: a rebuild for upstream and security updates."
+LIST_ITEM = re.compile(r"[*-] ")
+# " by @login" at the end of a pull request line, before " in URL" (GitHub: "* title by @login in URL"; a bot's
+# login ends in "[bot]"). Only the last one: a title may say "by" itself.
+AUTHOR = re.compile(r"[ \t]+by @\S+(?= in \S+[ \t]*$)")
+NEW_CONTRIBUTORS = re.compile(r" {0,3}#{1,6}[ \t]+New Contributors[ \t]*")
 FENCE = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
 HEADING = re.compile(r"^( {0,3})(#{1,5})(?=[ \t]|$)")
+
+
+def without_authors(text):
+    """GitHub's generated notes without the authors' @-mentions: " by @login" leaves each pull request line, and the
+    "New Contributors" section (its heading and its list, each line "* @login made their first contribution ...")
+    is dropped."""
+    out, dropping = [], False
+    for line in text.split("\n"):
+        if NEW_CONTRIBUTORS.fullmatch(line):
+            dropping = True
+            continue
+        if dropping:
+            if not line.strip() or LIST_ITEM.match(line):
+                continue
+            dropping = False  # the section ends at the first line that is neither blank nor a list item
+        if LIST_ITEM.match(line):
+            line = AUTHOR.sub("", line, count=1)
+        out.append(line)
+    return "\n".join(out)
+
+
+def changes_section(prs):
+    text = without_authors(prs or "").strip()
+    listed = any(LIST_ITEM.match(line) for line in text.split("\n"))
+    text = demote_headings(text)
+    if not listed:  # no pull request: GitHub still returns the "**Full Changelog**" link, which stays
+        text = REBUILD + ("\n\n" + text if text else "")
+    return "## Changes in this repository\n\n" + text + "\n"
 
 
 def demote_headings(text):
@@ -356,8 +393,7 @@ def build_notes(m, prev, prs, changelog, capped):
     version = m["version"]
     if changelog and version.endswith(".0"):
         parts.append(upgrading_block(changelog, version))
-    prs = demote_headings((prs or "").strip())
-    parts.append("## Changes in this repository\n\n" + (prs if prs else "None: a rebuild for upstream and security updates.") + "\n")
+    parts.append(changes_section(prs))
     parts.append(upstream_section(m, prev))
     if capped:
         parts.append("## Packages\n\nThe package lists are too long for these notes. "

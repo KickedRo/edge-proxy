@@ -54,11 +54,11 @@ Two workflows, both in `.github/workflows/`:
    credentials. It checks that the `release-manifest` artifact describes what was published, finds the previous
    release (the highest published `vX.Y.Z` below this one) and its `manifest.json`, asks GitHub for the pull requests
    merged since (`scripts/release.sh notes-inputs`), and writes the notes (`scripts/release_notes.py notes`; for
-   `X.Y.0` with the Upgrading note of `CHANGELOG.md`). Then `scripts/release.sh` creates the Release `vX.Y.Z` as a
-   **draft** on the built commit, uploads `manifest.json`, and publishes it, marked latest (unless a higher version
-   already has its Release). Publishing creates the git tag `vX.Y.Z` on that commit. The job is idempotent: it creates
-   what is missing and changes nothing that exists and matches (see
-   [a failed release](#a-failed-release-release-vxyz-is-missing)).
+   `X.Y.0` with the Upgrading note of `CHANGELOG.md`). The notes link each pull request but leave out GitHub's
+   @-mentions of their authors. Then `scripts/release.sh` creates the Release `vX.Y.Z` as a **draft** on the built
+   commit, uploads `manifest.json`, and publishes it, marked latest (unless a higher version already has its
+   Release). Publishing creates the git tag `vX.Y.Z` on that commit. The job is idempotent: it creates what is missing
+   and changes nothing that exists and matches (see [a failed release](#a-failed-release-release-vxyz-is-missing)).
 5. `report` (scheduled runs): opens a "Build failed" issue when a scheduled run failed or timed out, and closes it
    when a later one passes.
 6. `keepalive` (scheduled runs): [below](#scheduled-workflows-stop-after-60-days).

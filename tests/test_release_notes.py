@@ -180,13 +180,16 @@ class NotesTest(Base):
         return d
 
     def test_notes_first_release_lists_everything(self):
-        prs = ("## What's Changed\n* Add a thing by @someone in #1\n\n## New Contributors\n"
-               "* @someone made their first contribution in #1\n\n"
+        prs = ("## What's Changed\n* Add a thing by @octocat in https://github.com/KickedRo/edge-proxy/pull/1\n\n"
+               "## New Contributors\n"
+               "* @octocat made their first contribution in https://github.com/KickedRo/edge-proxy/pull/1\n\n"
                "**Full Changelog**: https://github.com/KickedRo/edge-proxy/commits/v0.1.0\n")  # as generate-notes
         text, _ = self.notes(self.current("0.1.0"), "--prs", self.write("prs.md", prs))
         self.assertIn("First versioned release", text)
         self.assertNotIn("→", text)  # nothing to compare with
-        self.assertIn("* Add a thing by @someone in #1", text)
+        self.assertIn("* Add a thing in https://github.com/KickedRo/edge-proxy/pull/1\n", text)
+        self.assertNotIn("@octocat", text)
+        self.assertNotIn("New Contributors", text)
         self.assertIn("\n### What's Changed\n", text)  # one level below "## Changes in this repository"
         self.assertNotIn("\n## What's Changed", text)
         # sections in order
@@ -231,13 +234,13 @@ class NotesTest(Base):
         self.assertEqual(text, self.read(self.fixture("notes-diff.expected.md")))
 
     def test_notes_demote_the_headings_of_the_prs_text(self):
-        prs = ("# Title\n## What's Changed\n* Add a thing by @someone in #1\n### Sub\n#### Four\n##### Five\n"
+        prs = ("# Title\n## What's Changed\n* Add a thing by @octocat in #1\n### Sub\n#### Four\n##### Five\n"
                "###### Six stays\n####### not a heading\n#hashtag\n#\n   ## Indented\n    ## indented code\n"
                "* a list item with # a hash sign\n"
                "```sh\n## in a code block\n```\n"
                "~~~~\n# in a tilde block\n~~~\n```\n~~~~\n## After the blocks\n\n"
                "**Full Changelog**: https://github.com/KickedRo/edge-proxy/compare/v0.1.0...v0.1.1\n")
-        want = ("## Title\n### What's Changed\n* Add a thing by @someone in #1\n#### Sub\n##### Four\n###### Five\n"
+        want = ("## Title\n### What's Changed\n* Add a thing in #1\n#### Sub\n##### Four\n###### Five\n"
                 "###### Six stays\n####### not a heading\n#hashtag\n##\n   ### Indented\n    ## indented code\n"
                 "* a list item with # a hash sign\n"
                 "```sh\n## in a code block\n```\n"
@@ -246,6 +249,48 @@ class NotesTest(Base):
         text, _ = self.notes(self.current(), "--prs", self.write("prs.md", prs))
         section = text.split("## Changes in this repository\n\n", 1)[1].split("\n## Upstream\n", 1)[0]
         self.assertEqual(section, want)
+
+    def changes(self, text):
+        """The text of the "Changes in this repository" section."""
+        return text.split("## Changes in this repository\n\n", 1)[1].split("\n## Upstream\n", 1)[0]
+
+    def test_notes_drop_author_mentions(self):
+        # GitHub's generated notes: "* <title> by @<login> in <pull request URL>", a bot's login ends in "[bot]",
+        # and a first contribution adds a "New Contributors" section.
+        prs = ("## What's Changed\n"
+               "* Sort the settings table by name by @octocat in https://github.com/KickedRo/edge-proxy/pull/12\n"
+               "* Bump actions/checkout from 6.0.0 to 7.0.1 by @example-bot[bot] in "
+               "https://github.com/KickedRo/edge-proxy/pull/13\n"
+               "\n"
+               "## New Contributors\n"
+               "* @octocat made their first contribution in https://github.com/KickedRo/edge-proxy/pull/12\n"
+               "* @example-bot[bot] made their first contribution in https://github.com/KickedRo/edge-proxy/pull/13\n"
+               "\n"
+               "**Full Changelog**: https://github.com/KickedRo/edge-proxy/compare/v0.1.0...v0.1.1\n")
+        text, _ = self.notes(self.current(), "--prs", self.write("prs.md", prs))
+        self.assertEqual(self.changes(text),
+                         "### What's Changed\n"
+                         "* Sort the settings table by name in https://github.com/KickedRo/edge-proxy/pull/12\n"
+                         "* Bump actions/checkout from 6.0.0 to 7.0.1 in "
+                         "https://github.com/KickedRo/edge-proxy/pull/13\n"
+                         "\n"
+                         "**Full Changelog**: https://github.com/KickedRo/edge-proxy/compare/v0.1.0...v0.1.1\n")
+        self.assertNotIn("@octocat", text)
+        self.assertNotIn("@example-bot", text)
+        self.assertNotIn("New Contributors", text)
+        self.assertNotIn("None: a rebuild", text)
+        # Only the author at the end of the line goes; the title is left as it was written.
+        line = "* Revert a change by @octocat in #10 by @octocat in https://github.com/KickedRo/edge-proxy/pull/14"
+        text, _ = self.notes(self.current(), "--prs", self.write("prs.md", line + "\n"))
+        self.assertEqual(self.changes(text),
+                         "* Revert a change by @octocat in #10 in https://github.com/KickedRo/edge-proxy/pull/14\n")
+
+    def test_notes_without_pull_requests_say_rebuild_and_keep_the_full_changelog(self):
+        # What generate-notes returns when no pull request was merged since the previous release.
+        full = "**Full Changelog**: https://github.com/KickedRo/edge-proxy/compare/v0.1.0...v0.1.1"
+        for prs in (full + "\n", "\n\n" + full + "\n"):
+            text, _ = self.notes(self.current(), "--prs", self.write("prs.md", prs))
+            self.assertEqual(self.changes(text), "None: a rebuild for upstream and security updates.\n\n" + full + "\n")
 
     def test_notes_unchanged_repository_says_rebuild(self):
         prev = self.manifest(self.contents_data(), "0.1.0", "previous.json")
