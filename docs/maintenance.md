@@ -46,8 +46,8 @@ Two workflows, both in `.github/workflows/`:
       images have the same layers and configuration (the "same-bits check").
    4. **Sign and attest.** A keyless cosign signature and the GitHub provenance attestation for both digests.
    5. **Manifest.** `scripts/release_notes.py manifest` writes `manifest.json` (version, commit, build key, digests,
-      upstream versions, package lists, Go modules) and stores it as the run's artifact `release-manifest`, kept 90
-      days.
+      upstream versions, package lists, Go modules) and stores it as the run's artifact `release-manifest`, kept 30
+      days (as long as GitHub lets a run be re-run).
    6. **Tag**, last: `X.Y.Z`, `X.Y` and `latest`, on `edge`, then on `gen`. Only `latest` and `X.Y` may move;
       `scripts/publish_tested.sh tag` refuses to move any other tag.
 4. `release` (only when `publish` published): the only job with `contents: write`, and it gets no registry
@@ -126,8 +126,8 @@ So the issue stays open, and after a failed push run the next scheduled run open
 1. Find the run that published `X.Y.Z` (its publish job's summary says `published version X.Y.Z`).
 2. Use **Re-run failed jobs** on that run, **within 30 days** of it: GitHub does not re-run older runs. The re-run
    release job uses the publish job's outputs, which a re-run keeps, and the run's `release-manifest` artifact (kept
-   90 days). It is idempotent: it creates what is missing (the draft, the asset, the publication and with it the git
-   tag) and leaves alone what exists and matches.
+   for those 30 days). It is idempotent: it creates what is missing (the draft, the asset, the publication and with it
+   the git tag) and leaves alone what exists and matches.
 3. If it stops on something that exists but differs (a tag on another commit, another `manifest.json`, an upload
    that did not complete, several drafts for one tag), it changes nothing and says what it found. Fix that by hand as
    the message says (for example delete the extra draft, or the incomplete asset of the draft), then re-run again.
