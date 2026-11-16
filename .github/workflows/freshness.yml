@@ -62,8 +62,9 @@ jobs:
             "edge=$RUNNER_TEMP/edge-proxy.json" "gen=$RUNNER_TEMP/edge-proxy-gen.json" | tee -a "$GITHUB_STEP_SUMMARY"
 
   # nginx-proxy's main against NGINX_PROXY_REF (scripts/check_template_pin.py): fails when main has commits touching
-  # nginx.tmpl, app/ or Dockerfile.dockergen that the pin does not have, the oldest more than 7 days old. Read-only:
-  # public GitHub API, with the workflow's token for the rate limit.
+  # what the images take from the pin (nginx.tmpl, app/, Dockerfile.dockergen, network_internal.conf,
+  # Dockerfile.debian) that the pin does not have, the oldest more than 7 days old. Read-only: public GitHub API, with
+  # the workflow's token for the rate limit.
   template:
     runs-on: ubuntu-latest
     timeout-minutes: 10
