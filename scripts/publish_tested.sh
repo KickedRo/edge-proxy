@@ -35,8 +35,11 @@
 #     For a run that publishes nothing: the version each REPOSITORY's :latest carries (its version label, when it is
 #     MAJOR.MINOR.PATCH) must have its git tag vMAJOR.MINOR.PATCH in TAGS_FILE (as for next-version), which only
 #     publishing its GitHub Release creates (a draft has none). Fails otherwise, with "Release vX.Y.Z is missing: ..."
-#     once per missing version, so the run stays red until the failed release job is re-run. Other labels (the
-#     date-based tags from before versions) and a missing :latest are not checked. Fails when the registry cannot tell.
+#     once per missing version, so the run stays red until the failed release job is re-run. When not every
+#     REPOSITORY's :latest carries that version, the publish job stopped between tagging the images (only a
+#     force_publish run then leaves the next runs nothing to publish) and no release job ran: the message says to
+#     re-run the publish job instead. Other labels (the date-based tags from before versions) and a missing :latest are
+#     not checked. Fails when the registry cannot tell.
 #
 #   scripts/publish_tested.sh push ARCHIVE TESTED_IDENTITY REPOSITORY KEY RELEASE_TAG
 #     Publishes the tested image without rebuilding it. ARCHIVE is `docker save` of the tested image (an OCI image
@@ -239,13 +242,14 @@ in_list() { # VALUE ITEM...: VALUE is one of the ITEMs
 
 released() {
   [ $# -ge 2 ] || usage
-  local tags=$1 repo version out
-  local tagged=() missing=()
+  local tags=$1 repo version out every v
+  local tagged=() missing=() versions=()
   shift
   out=$(tag_versions "$tags") || exit 1
   [ -z "$out" ] || mapfile -t tagged <<<"$out"
   for repo in "$@"; do
     version=$(latest_version "$repo") || exit 1 # the registry could not tell: never guess
+    versions+=("$version")
     if [[ ! $version =~ $VERSION_RE ]]; then
       echo "not checked: $repo:latest has no MAJOR.MINOR.PATCH version label ('$version')" >&2
     elif in_list "$version" "${tagged[@]}"; then
@@ -255,8 +259,18 @@ released() {
     fi
   done
   for version in "${missing[@]}"; do
-    echo "publish_tested: Release v$version is missing: re-run the failed release job of the run that published it" \
-      "(see docs/maintenance.md)" >&2
+    every=true
+    for v in "${versions[@]}"; do
+      [ "$v" = "$version" ] || every=false
+    done
+    if [ "$every" = true ]; then
+      echo "publish_tested: Release v$version is missing: re-run the failed release job of the run that published it" \
+        "(see docs/maintenance.md)" >&2
+    else
+      echo "publish_tested: Release v$version is missing, and only some :latest images carry it: the publish job of" \
+        "the run that published it stopped between tagging the images, so no release job ran. Re-run that failed" \
+        "publish job, or run build.yml with force_publish (see docs/maintenance.md)" >&2
+    fi
   done
   [ ${#missing[@]} -eq 0 ] || exit 1
 }

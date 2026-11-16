@@ -7,7 +7,8 @@
 # run that publishes nothing, a second publish that becomes the next patch) and the cases they must refuse. The git
 # release tags the publish job reads with `git ls-remote` are stub files here (one tag per line); registry states the
 # two published images do not reach (a `latest` of another line, a version only the registry has, a label from before
-# versions) are label-only stub images. Signing and the GitHub provenance attestation need GitHub's OIDC token, so
+# versions) are label-only stub images. A registry that cannot answer one lookup is a docker wrapper that sends that
+# lookup to an address nothing listens on. Signing and the GitHub provenance attestation need GitHub's OIDC token, so
 # they only run in the publish job itself.
 # BUILDKIT_IMAGE (required) is the BuildKit image the publish job uses, build.yml's pin, so the rehearsal runs the
 # BuildKit that publishes. The GEN_ARCHIVE image is loaded into Docker if it is not there yet (removed again after).
@@ -55,6 +56,23 @@ running=$(docker inspect -f '{{.Config.Image}}' "buildx_buildkit_${RUN}0")
 pass builder_runs_the_pinned_buildkit
 
 decide() { "$P" decide "$@"; }   # its reasons go to stderr, into the log
+# unreachable "REF..." COMMAND...: runs COMMAND with a docker whose `buildx imagetools inspect` of each REF goes to
+# localhost:1 (nothing listens there) instead, as when the registry fails for that one lookup.
+REAL_DOCKER=$(command -v docker)
+mkdir "$TMP/unreachable-bin"
+cat > "$TMP/unreachable-bin/docker" <<'SHIM'
+#!/usr/bin/env bash
+if [ "$1 $2 $3" = "buildx imagetools inspect" ] && [[ " $UNREACHABLE_REFS " == *" $4 "* ]]; then
+  set -- "$1" "$2" "$3" "localhost:1/unreachable:${4##*:}" "${@:5}"
+fi
+exec "$REAL_DOCKER" "$@"
+SHIM
+chmod +x "$TMP/unreachable-bin/docker"
+unreachable() {
+  local refs=$1
+  shift
+  PATH="$TMP/unreachable-bin:$PATH" REAL_DOCKER=$REAL_DOCKER UNREACHABLE_REFS=$refs "$@"
+}
 digest() { docker buildx imagetools inspect "$1" --format '{{json .Manifest}}' | jq -r .digest; }
 # tags FILE TAG...: a stub of the git release tags as the publish job lists them (one per line).
 tags() { local f=$1; shift; printf '%s\n' "$@" > "$f"; }
@@ -93,6 +111,15 @@ pass decide_publishes_without_latest
 [ "$("$P" next-version 0.1 "$TMP/no-tags" "$REG/edge" "$REG/gen")" = 0.1.0 ] \
   || fail next_version_first_of_line "the first version of line 0.1 must be 0.1.0"
 pass next_version_first_of_line
+# The first run with versions: each :latest carries a date-based version label from before versions, there is no git
+# tag yet, and the content is the same (the build key matches). Line 0.1 has no release: publish, as 0.1.0.
+stub "$REG/first-edge:latest" "$KEY" 1.31.8-modsec3.0.17-crs4.30.0-20261116.3
+stub "$REG/first-gen:latest" "$KEY" 0.17.2-npbff2cddfece8-20261116
+[ "$(decide "$KEY" 0.1 "$TMP/no-tags" false "$REG/first-edge" "$REG/first-gen")" = true ] \
+  || fail first_run_publishes_0.1.0 "the labels from before versions must not count as a release of line 0.1"
+[ "$("$P" next-version 0.1 "$TMP/no-tags" "$REG/first-edge" "$REG/first-gen")" = 0.1.0 ] \
+  || fail first_run_publishes_0.1.0 "the first version must be 0.1.0"
+pass first_run_publishes_0.1.0
 # Only vMAJOR.MINOR.PATCH tags count: no pre-releases, other names, tags without the v or with leading zeros.
 tags "$TMP/tags" v0.1.0 v0.1.1 v0.1.0-rc1 vfoo 0.1.7 v0.1.08 v1.0.0-rc1 $'v0.1.9\r'
 got=$("$P" next-version 0.1 "$TMP/tags" "$REG/edge" "$REG/gen")
@@ -104,6 +131,14 @@ fi
 { [ -z "$out" ] && grep -q 'cannot tell whether' "$TMP/version.log"; } \
   || fail next_version_refuses_to_guess "$(cat "$TMP/version.log")"
 pass next_version_refuses_to_guess
+# The same when each :latest could be read (there is none yet) but one probe of LINE.N cannot be answered.
+if out=$(unreachable "$REG/gen:0.1.0" "$P" next-version 0.1 "$TMP/no-tags" "$REG/edge" "$REG/gen" \
+  2>"$TMP/version.log"); then
+  fail next_version_probe_refuses_to_guess "a version was chosen although $REG/gen:0.1.0 could not be looked up: '$out'"
+fi
+{ [ -z "$out" ] && grep -qF "cannot tell whether $REG/gen:0.1.0 exists" "$TMP/version.log"; } \
+  || fail next_version_probe_refuses_to_guess "$(cat "$TMP/version.log")"
+pass next_version_probe_refuses_to_guess
 # Without the list of git tags neither may go on (a release would look missing): fail, never assume there is none.
 if out=$(decide "$KEY" 0.1 "$TMP/no-such-file" false "$REG/edge" "$REG/gen" 2>"$TMP/decide.log"); then
   fail tag_list_required "decide answered '$out' without the tag list"
@@ -164,6 +199,22 @@ if "$P" released "$TMP/tags" "localhost:1/unreachable" 2>"$TMP/released.log"; th
 fi
 grep -q 'cannot tell whether' "$TMP/released.log" || fail released_refuses_to_guess "$(cat "$TMP/released.log")"
 pass released_refuses_to_guess
+# A force_publish run (same content) that stopped between tagging edge and gen: edge's :latest carries 0.1.5, which has
+# no Release, gen's still 0.1.4. The next runs publish nothing, and no release job ran for 0.1.5: the message says to
+# re-run the publish job (or force_publish), not a release job.
+stub "$REG/split-edge:latest" "$KEY" 0.1.5
+stub "$REG/split-gen:latest" "$KEY" 0.1.4
+tags "$TMP/tags" v0.1.0 v0.1.4
+[ "$(decide "$KEY" 0.1 "$TMP/tags" false "$REG/split-edge" "$REG/split-gen")" = false ] \
+  || fail released_names_the_publish_job_after_a_split_publish "the same content on line 0.1 must skip"
+if "$P" released "$TMP/tags" "$REG/split-edge" "$REG/split-gen" 2>"$TMP/released.log"; then
+  fail released_names_the_publish_job_after_a_split_publish "passed without the git tag v0.1.5"
+fi
+{ grep -qF 'Release v0.1.5 is missing, and only some :latest images carry it' "$TMP/released.log" \
+  && grep -qF 'Re-run that failed publish job, or run build.yml with force_publish' "$TMP/released.log" \
+  && ! grep -qF 'release job of the run' "$TMP/released.log"; } \
+  || fail released_names_the_publish_job_after_a_split_publish "$(cat "$TMP/released.log")"
+pass released_names_the_publish_job_after_a_split_publish
 tags "$TMP/tags" v0.1.0
 [ "$(decide "$OTHER_KEY" 0.1 "$TMP/tags" false "$REG/edge" "$REG/gen")" = true ] \
   || fail decide_publishes_a_changed_key "another key must publish"
@@ -258,6 +309,15 @@ for t in "0.1.0=$gen" "0.1.1=$gen2" "0.1=$gen2" "latest=$gen2"; do
   [ "$got" = "${t#*=}" ] || fail tag_moves_line_and_latest_only "gen:${t%%=*} is $got, expected ${t#*=}"
 done
 pass tag_moves_line_and_latest_only
+# The registry cannot tell whether a version tag exists: tag refuses before it tags anything (0.1 and latest stay).
+if unreachable "$REG/gen:0.1.2" "$P" tag "$REG/gen" "$gen" 0.1 latest 0.1.2 2>"$TMP/tag.log"; then
+  fail tag_refuses_to_guess "tagged although $REG/gen:0.1.2 could not be looked up"
+fi
+grep -qF "cannot tell whether $REG/gen:0.1.2 exists" "$TMP/tag.log" || fail tag_refuses_to_guess "$(cat "$TMP/tag.log")"
+for t in 0.1 latest; do
+  [ "$(digest "$REG/gen:$t")" = "$gen2" ] || fail tag_refuses_to_guess "gen:$t was moved by a refused tag"
+done
+pass tag_refuses_to_guess
 
 if "$P" push "$EDGE_ARCHIVE" "$GEN_ID" "$REG/mismatch" "$KEY" 0.1.0 >"$TMP/push.out" 2>"$TMP/push.log"; then
   fail push_mismatch "push succeeded although the archive is not the tested image"
