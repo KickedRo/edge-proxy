@@ -59,6 +59,13 @@ content_type_item() { # |type/subtype| in lower case: letters, digits and . + _ 
         *) return 1;;
     esac
 }
+header_item() { # /name/: a header name in lower case, 1 to 64 letters, digits and -, starting with a letter or digit
+    case $1 in '/'?*'/') ;; *) return 1;; esac
+    hn=${1#/}
+    hn=${hn%/}
+    case $hn in ''|[!a-z0-9]*|*[!a-z0-9-]*) return 1;; esac
+    [ "${#hn}" -le 64 ]
+}
 matches() { # value alternative -> true when value is that literal value or has that <form>
     case $2 in
         '<integer>') is_int "$1" 15;;
@@ -77,6 +84,7 @@ matches() { # value alternative -> true when value is that literal value or has 
             esac;;
         '<methods>') items_are "$1" method_item;;
         '<content-types>') items_are "$1" content_type_item;;
+        '<headers>') items_are "$1" header_item;;
         *) [ "$1" = "$2" ];;
     esac
 }
@@ -96,7 +104,7 @@ above() { # value threshold -> true when value is above the threshold (same form
         *) [ "$(ms "$1")" -gt "$(ms "$2")" ];;
     esac
 }
-adds_items() { # value default -> true when value has an item (separated by single spaces) the default does not have
+adds_items() { # list other -> true when list has an item (separated by single spaces) that other does not have
     adds_rest=$1
     while :; do
         adds_item=${adds_rest%% *}
@@ -110,6 +118,7 @@ weaker() { # value WEAKER_IF default -> true when value is weaker than the defau
         -) return 1;;
         '>'*) above "$1" "${2#>}";;
         +) adds_items "$1" "$3";;
+        '<') adds_items "$3" "$1";; # a list that lacks an item of the default
         *) one_of "$1" "$2";;
     esac
 }
@@ -120,4 +129,5 @@ explain() { # ALLOWED -> the forms it uses, explained (as in the header of setti
     case $1 in *'<path>'*) printf ' <path> is an absolute file path (letters, digits and . _ / - only).';; esac
     case $1 in *'<methods>'*) printf ' <methods> is a list of HTTP methods separated by single spaces, each of capital letters and -, e.g. GET HEAD POST OPTIONS PUT.';; esac
     case $1 in *'<content-types>'*) printf ' <content-types> is a list of |type/subtype| items in lower case separated by single spaces, e.g. |application/json| |text/plain|.';; esac
+    case $1 in *'<headers>'*) printf ' <headers> is a list of /name/ items (header names in lower case: letters, digits and -) separated by single spaces, e.g. /proxy/ /if/.';; esac
 }

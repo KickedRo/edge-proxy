@@ -38,8 +38,9 @@ does not pass and closed by it when the check passes again:
   than 8 days or its nginx is older than upstream's current mainline. It is the alarm for a pipeline that has silently
   stopped, and is independent of the build workflow.
 - `scripts/check_template_pin.py` compares `NGINX_PROXY_REF` with nginx-proxy's `main` and fails, with the issue
-  "nginx-proxy template moved past the pin", when `main` has commits the pin does not have that touch `nginx.tmpl`,
-  `app/` or `Dockerfile.dockergen`, and the oldest of them is more than 7 days old. The week lets upstream settle (a
+  "nginx-proxy template moved past the pin", when `main` has commits the pin does not have that touch what the
+  images take from it (`nginx.tmpl`, `app/` and `Dockerfile.dockergen` for `gen`; `network_internal.conf` and
+  `Dockerfile.debian` for `edge`), and the oldest of them is more than 7 days old. The week lets upstream settle (a
   change and its fix often come close together). The run's summary lists the commits.
 
 Manual dispatch inputs of `build.yml`: `security_epoch` (re-run the upgrade layers), `force_publish` (publish even if

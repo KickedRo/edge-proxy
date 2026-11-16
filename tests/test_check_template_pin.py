@@ -41,10 +41,14 @@ def run(files, pin=PIN, extra=()):
                               capture_output=True, text=True)
 
 
+WATCHED = ("nginx.tmpl", "app", "Dockerfile.dockergen", "network_internal.conf", "Dockerfile.debian")
+
+
 def no_path_changes(**paths):
-    """Fixture pages for the three watched paths: empty unless given."""
-    files = {"commits-nginx.tmpl-1": [], "commits-app-1": [], "commits-Dockerfile.dockergen-1": []}
-    files.update({f"commits-{k.replace('_', '.')}-1": v for k, v in paths.items()})
+    """Fixture pages for the watched paths: empty unless given (keyword: the path with . as __, e.g. nginx__tmpl)."""
+    files = {f"commits-{p}-1": [] for p in WATCHED}
+    files.update({f"commits-{k.replace('__', '.')}-1": v for k, v in paths.items()})
+    assert all(k[len("commits-"):-2] in WATCHED for k in files), files
     return files
 
 
@@ -62,7 +66,7 @@ class CheckTemplatePin(unittest.TestCase):
         self.assertIn("OK: 2 commits", r.stdout)
 
     def test_template_change_older_than_a_week_is_behind(self):
-        files = no_path_changes(nginx_tmpl=[entry(2, "2026-11-08T05:46:59Z")], app=[entry(3, "2026-11-15T00:00:00Z")])
+        files = no_path_changes(nginx__tmpl=[entry(2, "2026-11-08T05:46:59Z")], app=[entry(3, "2026-11-15T00:00:00Z")])
         files["compare-1"] = compare([entry(1, "2026-11-01T00:00:00Z"), entry(2, "2026-11-08T05:46:59Z"),
                                       entry(3, "2026-11-15T00:00:00Z")])
         r = run(files)
@@ -73,12 +77,22 @@ class CheckTemplatePin(unittest.TestCase):
         self.assertNotIn("SECRET-MESSAGE", r.stdout + r.stderr)
 
     def test_change_of_exactly_a_week_is_still_recent(self):
-        files = no_path_changes(Dockerfile_dockergen=[entry(2, "2026-11-09T05:47:00Z")])
+        files = no_path_changes(Dockerfile__dockergen=[entry(2, "2026-11-09T05:47:00Z")])
         files["compare-1"] = compare([entry(2, "2026-11-09T05:47:00Z")])
         r = run(files)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("RECENT: 1 commits", r.stdout)
         self.assertIn("Dockerfile.dockergen", r.stdout)
+
+    def test_edge_files_are_watched(self):
+        # edge takes network_internal.conf and Dockerfile.debian's nginx.conf changes from the pinned commit too.
+        files = no_path_changes(network_internal__conf=[entry(2, "2026-10-01T00:00:00Z")],
+                                Dockerfile__debian=[entry(3, "2026-10-02T00:00:00Z")])
+        files["compare-1"] = compare([entry(2, "2026-10-01T00:00:00Z"), entry(3, "2026-10-02T00:00:00Z")])
+        r = run(files)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn(f"CHANGED {sha(2)[:12]} 2026-10-01T00:00:00Z network_internal.conf", r.stdout)
+        self.assertIn(f"CHANGED {sha(3)[:12]} 2026-10-02T00:00:00Z Dockerfile.debian", r.stdout)
 
     def test_grace_days_option(self):
         files = no_path_changes(app=[entry(2, "2026-11-14T00:00:00Z")])
@@ -87,7 +101,7 @@ class CheckTemplatePin(unittest.TestCase):
         self.assertEqual(run(files, extra=("--grace-days", "1")).returncode, 1)
 
     def test_one_commit_touching_two_paths_is_listed_once(self):
-        files = no_path_changes(nginx_tmpl=[entry(2, "2026-10-01T00:00:00Z")], app=[entry(2, "2026-10-01T00:00:00Z")])
+        files = no_path_changes(nginx__tmpl=[entry(2, "2026-10-01T00:00:00Z")], app=[entry(2, "2026-10-01T00:00:00Z")])
         files["compare-1"] = compare([entry(2, "2026-10-01T00:00:00Z")])
         r = run(files)
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
@@ -96,7 +110,7 @@ class CheckTemplatePin(unittest.TestCase):
 
     def test_template_commits_the_pin_has_are_ignored(self):
         # The path listing reaches back before the pin (commit 9 is the pinned history, not on the comparison).
-        files = no_path_changes(nginx_tmpl=[entry(9, "2026-09-01T00:00:00Z")])
+        files = no_path_changes(nginx__tmpl=[entry(9, "2026-09-01T00:00:00Z")])
         files["compare-1"] = compare([entry(1, "2026-10-01T00:00:00Z")])
         r = run(files)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -113,7 +127,7 @@ class CheckTemplatePin(unittest.TestCase):
         self.assertIn(f"CHANGED {sha(150)[:12]}", r.stdout)
 
     def test_incomplete_or_unusable_answers_are_errors(self):
-        good = no_path_changes(nginx_tmpl=[entry(2, "2026-10-01T00:00:00Z")])
+        good = no_path_changes(nginx__tmpl=[entry(2, "2026-10-01T00:00:00Z")])
         good["compare-1"] = compare([entry(2, "2026-10-01T00:00:00Z")])
         self.assertEqual(run(good).returncode, 1)
         cases = {

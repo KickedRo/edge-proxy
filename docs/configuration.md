@@ -10,8 +10,8 @@ their defaults and what you lose by weakening them, see the **[settings table](s
   and linking to the settings table. Check `docker logs` after changing a setting.
 
 Contents: [Mount points](#mount-points-for-your-own-rules-and-config) ·
-[ACME exemption](#the-acme-challenge-exemption) · [First-use false positives](#first-use-false-positives) ·
-[Expect: 100-continue](#expect-100-continue-is-blocked) · [Audit log](#audit-log) · [Block page](#block-page) ·
+[ACME exemption](#the-acme-challenge-exemption) · [What the WAF lets through](#what-the-waf-lets-through-by-default) ·
+[Audit log](#audit-log) · [Block page](#block-page) ·
 [Headers](#security-headers-and-hidden-backend-headers) · [Proxy-wide files](#proxy-wide-files-in-confd) ·
 [A replaced nginx.conf](#a-replaced-nginxconf) · [Migrating](#migrating-from-an-existing-nginx-proxy-setup) ·
 [Read-only filesystem](#read-only-root-filesystem) · [The gen image](#the-gen-image)
@@ -33,6 +33,9 @@ the plugins' `*-config.conf` and `*-before.conf`, `custom.d`, the CRS rules, the
 setting that needs the rules, `after.d`.
 
 Use rule IDs from 10100 to 99999 for your own rules (10001 is the image's ACME exemption; the CRS uses 900000 and up).
+Do not reuse the CRS setup IDs the image sets itself (900000, 900110, 900200, 900220, 900250): libmodsecurity accepts
+the duplicate without a message, so the mistake goes unnoticed. To change what they set, use the `MODSEC_*` setting, or
+a `setvar` rule with an ID of your own (as in the examples below).
 The files must be readable by the `nginx` user. A ModSecurity syntax error in a file stops nginx from starting, and
 makes a reload fail while the old configuration keeps serving.
 
@@ -78,38 +81,38 @@ To remove the exemption (for example when you use DNS validation only), mount a 
 SecRuleRemoveById 10001
 ```
 
-## First-use false positives
+## What the WAF lets through by default
 
-With the WAF on (`MODSEC_RULE_ENGINE=On`, the default), the OWASP CRS's default policy and ModSecurity's body limits
-refuse some legitimate requests out of the box. These are the usual ones; each has a setting or a small file. They get
-the deny status and the [block page](#block-page), whose reference finds the audit entry, which names the rule.
+With the WAF on (`MODSEC_RULE_ENGINE=On`, the default), requests are inspected by the OWASP CRS and attacks are
+blocked. The CRS's own defaults are stricter than most sites need: they also refuse ordinary REST and upload traffic.
+The image's defaults let common legitimate traffic through, and each loosening is one setting that tightens back. A
+request that is refused gets the deny status and the [block page](#block-page), whose reference finds the audit entry,
+which names the rule.
 
-| Refused | Rule | Typical clients | What to do |
+### Allowed by default, and how to tighten it
+
+| Allowed by default | CRS or ModSecurity default | Setting | Tightening buys |
 |---|---|---|---|
-| Methods other than `GET`, `HEAD`, `POST` and `OPTIONS` | 911100 | REST APIs and single-page applications (`PUT`, `PATCH`, `DELETE`); WebDAV, CalDAV and Nextcloud (`PROPFIND`, `MKCOL`, ...) | [`MODSEC_ALLOWED_METHODS`](settings.md#modsec_allowed_methods), or for one site the snippet below |
-| Request bodies of other types than forms, multipart, XML and JSON | 920420 | `application/octet-stream` uploads (WebDAV, file sync, container registries) | [`MODSEC_ALLOWED_REQUEST_CONTENT_TYPE`](settings.md#modsec_allowed_request_content_type) |
-| Method-override headers (`X-HTTP-Method-Override` and two others) | 920450 | WordPress's block editor: it sends updates and deletes as `POST` with `X-HTTP-Method-Override` | the snippet below |
-| `Expect: 100-continue` | 920450 | `curl` and some API clients | see [below](#expect-100-continue-is-blocked) |
-| Form, JSON or XML bodies over 128 KiB (file uploads not counted) | 200002 | editors that save a whole page at once, webhooks with large payloads | [`MODSEC_REQ_BODY_NOFILES_LIMIT`](settings.md#modsec_req_body_nofiles_limit) |
-| 1000 arguments or more (query string and form fields together) | 200007 | WordPress menus with many items, shop products with many variations | [`MODSEC_ARGUMENTS_LIMIT`](settings.md#modsec_arguments_limit) |
+| `PUT`, `PATCH` and `DELETE` (REST APIs, single-page applications) | refused (rule 911100) | [`MODSEC_ALLOWED_METHODS`](settings.md#modsec_allowed_methods) | a request with these methods never reaches an application that does not expect it |
+| Method-override headers `X-HTTP-Method-Override`, `X-HTTP-Method`, `X-Method-Override` (WordPress's block editor sends updates and deletes as `POST` with the first) | refused (rule 920450) | [`MODSEC_RESTRICTED_HEADERS_BASIC`](settings.md#modsec_restricted_headers_basic) | the WAF always sees the method the application acts on: with the header, a request checked as `POST` is handled as `PUT` or `DELETE` |
+| `Expect: 100-continue` (`curl` and .NET clients send it with uploads) | refused (rule 920450) | [`MODSEC_RESTRICTED_HEADERS_BASIC`](settings.md#modsec_restricted_headers_basic) | little behind nginx: the CRS blocks `Expect` against desync attacks between a proxy and its backend, but nginx answers `100 Continue` itself and does not forward the header to the backends it proxies to (tested) |
+| Form, JSON and XML bodies up to 1 MiB, file uploads not counted | 128 KiB (rule 200002; ModSecurity's recommended value) | [`MODSEC_REQ_BODY_NOFILES_LIMIT`](settings.md#modsec_req_body_nofiles_limit) | less memory and CPU an attacker can make the WAF spend per request; 1 MiB is nginx's default `client_max_body_size`, so with nginx's defaults the WAF never refuses a body nginx accepts |
+| Up to 2999 arguments (query string and form fields together; WordPress menus, shop variation forms) | 999 (rule 200007; ModSecurity's recommended value) | [`MODSEC_ARGUMENTS_LIMIT`](settings.md#modsec_arguments_limit) | less parsing an attacker can make the WAF do per request |
 
-**A first week in detection-only mode.** On a new site, start with `MODSEC_RULE_ENGINE=DetectionOnly`: nothing is
-refused, and the audit log records what would have been. Look for the rule IDs above (and any other), set what your
-applications need, add narrow exclusions, then switch back to `On`.
-
-**The settings** apply to every site behind the `edge`. Each replaces the CRS's list, so give the whole list, and each
-prints a `SECURITY:` line at start, because it allows more than the default:
+To go back to the CRS's own lists and ModSecurity's limits for every site:
 
 ```yaml
     environment:
-      MODSEC_ALLOWED_METHODS: "GET HEAD POST OPTIONS PUT PATCH DELETE"
-      MODSEC_ALLOWED_REQUEST_CONTENT_TYPE: "|application/x-www-form-urlencoded| |multipart/form-data| |text/xml| |application/xml| |application/soap+xml| |application/json| |application/octet-stream|"
-      MODSEC_REQ_BODY_NOFILES_LIMIT: "1048576"
-      MODSEC_ARGUMENTS_LIMIT: "5000"
+      MODSEC_ALLOWED_METHODS: "GET HEAD POST OPTIONS"
+      MODSEC_RESTRICTED_HEADERS_BASIC: "/content-encoding/ /proxy/ /lock-token/ /content-range/ /if/ /x-http-method-override/ /x-http-method/ /x-method-override/ /x-middleware-subrequest/ /expect/"
+      MODSEC_REQ_BODY_NOFILES_LIMIT: "131072"
+      MODSEC_ARGUMENTS_LIMIT: "1000"
 ```
 
-**One site only.** A file in `custom.d` can set the CRS's own variable for one host, which is narrower than a setting.
-This one allows `PUT`, `PATCH` and `DELETE` on `app.example.com` (every other host keeps the default):
+Tightening prints nothing at start; only a value that allows more than the default prints a `SECURITY:` line.
+
+**Tightening one site.** A file in `custom.d` can set the CRS's own variable for one host. This one allows only the
+CRS's methods on `app.example.com`; every other host keeps the image's default:
 
 ```
 # custom.d/app-example-com-methods.conf
@@ -118,28 +121,43 @@ SecRule REQUEST_HEADERS:Host "@streq app.example.com" \
     phase:1,\
     pass,\
     nolog,\
-    setvar:'tx.allowed_methods=GET HEAD POST OPTIONS PUT PATCH DELETE'"
+    setvar:'tx.allowed_methods=GET HEAD POST OPTIONS'"
 ```
 
-**WordPress's method override.** This file allows the `X-HTTP-Method-Override` header on `app.example.com`. It is the
-CRS's default list of restricted headers without `/x-http-method-override/`; the other two override headers and
-`Expect` stay blocked:
+The same works for `tx.restricted_headers_basic` (the header list) on a host that needs no method override.
+
+### Still blocked by default, and how to allow it
+
+| Blocked by default | Rule | Typical clients | Setting |
+|---|---|---|---|
+| Request bodies of types other than forms (`application/x-www-form-urlencoded`, `multipart/form-data`), XML and JSON | 920420 | raw-file uploads (`application/octet-stream`: WebDAV, file sync, container registries), `text/plain` beacons, CSP reports (`application/csp-report`) | [`MODSEC_ALLOWED_REQUEST_CONTENT_TYPE`](settings.md#modsec_allowed_request_content_type) |
+| Other methods, such as WebDAV's `PROPFIND`, `MKCOL`, `COPY`, `MOVE`, `LOCK` | 911100 | WebDAV, CalDAV and CardDAV, Nextcloud | [`MODSEC_ALLOWED_METHODS`](settings.md#modsec_allowed_methods) |
+| The other restricted headers: `Content-Encoding`, `Proxy`, `Lock-Token`, `Content-Range`, `If`, `X-Middleware-Subrequest` | 920450 | rarely legitimate in a request | [`MODSEC_RESTRICTED_HEADERS_BASIC`](settings.md#modsec_restricted_headers_basic) |
+
+**Body types stay strict on purpose.** ModSecurity parses forms, multipart, XML and JSON (and the CRS also allows the
+`application/*+json` types and two AWS JSON types). The body of any other type is not parsed, so its content reaches
+the application with much less inspection. Allowing such a type for every site would let an attack through by changing
+one header. Allow a type only on the hosts that need it, with one line in `custom.d`; it adds the type to the list for
+that host:
 
 ```
-# custom.d/app-example-com-method-override.conf
-SecRule REQUEST_HEADERS:Host "@streq app.example.com" \
-    "id:10110,\
-    phase:1,\
-    pass,\
-    nolog,\
-    setvar:'tx.restricted_headers_basic=/content-encoding/ /proxy/ /lock-token/ /content-range/ /if/ /x-http-method/ /x-method-override/ /x-middleware-subrequest/ /expect/'"
+# custom.d/dav-example-com-octet-stream.conf
+SecRule REQUEST_HEADERS:Host "@streq dav.example.com" "id:10130,phase:1,pass,nolog,setvar:'tx.allowed_request_content_type=%{tx.allowed_request_content_type} |application/octet-stream|'"
 ```
 
-The risk: on that host the application acts on a method the WAF does not see. ModSecurity checks the request as a
-`POST`, while the application handles it as `PUT` or `DELETE`, so the method policy (911100) no longer applies there.
-Keep it to the hosts that need it. Like the `Expect` file below, it freezes the CRS 4.30 list: check the CRS changelog
-when you update, and copy a changed default list. Both files set the same variable, so to allow `Expect` on that host
-as well, leave `/expect/` out of this line instead of adding the other file.
+The risk: on that host, a body of that type is not parsed into arguments, so most CRS rules do not see its content,
+and an attack in such a body can reach the application. `MODSEC_ALLOWED_REQUEST_CONTENT_TYPE` does the same for
+every site (give the whole list).
+
+**Methods for WebDAV.** Add the methods the application uses to `MODSEC_ALLOWED_METHODS` (for every site), or set
+`tx.allowed_methods` for its host only, like the tightening example above. WebDAV clients often also send
+`application/octet-stream` bodies (see above) and the `Lock-Token` and `If` headers, which stay restricted: leave them
+out of `tx.restricted_headers_basic` for that host if the client needs them. For Nextcloud, see also its
+[CRS plugin](#crs-plugins).
+
+**A first week in detection-only mode.** On a new site, start with `MODSEC_RULE_ENGINE=DetectionOnly`: nothing is
+refused, and the audit log records what would have been. Look for the rule IDs above (and any other), set what your
+applications need, add narrow exclusions, then switch back to `On`.
 
 ### CRS plugins
 
@@ -150,24 +168,6 @@ you have reviewed, and mount the files of its `plugins/` directory at `/etc/ngin
 fine). They are loaded in the CRS's order: every `*-config.conf`, then every `*-before.conf` before the CRS rules, and
 every `*-after.conf` after them. Read the plugin's README: some need a setting in their `*-config.conf`, and some
 apply to every host unless you narrow them.
-
-## `Expect: 100-continue` is blocked
-
-The Core Rule Set 4 blocks requests with an `Expect` header (rule 920450, an anti-request-smuggling measure). Browsers
-never send it. `curl` and some API clients add `Expect: 100-continue` to larger uploads,
-and those requests then get the deny status. Prefer fixing the client (`curl -H 'Expect:'` switches it off).
-
-If you cannot, this file in `custom.d` allows `Expect` and keeps every other restricted header blocked. It is the
-CRS's own default list without `/expect/`:
-
-```
-SecAction "id:10100,phase:1,pass,nolog,setvar:'tx.restricted_headers_basic=/content-encoding/ /proxy/ /lock-token/ /content-range/ /if/ /x-http-method-override/ /x-http-method/ /x-method-override/ /x-middleware-subrequest/'"
-```
-
-The risk: the `Expect` header is one of the ingredients of request desync attacks between a proxy and a backend that
-handles it badly, and the list is now frozen as of CRS 4.30: check the CRS changelog when you update, and copy a changed
-default list. (Removing rule 920450 with `SecRuleRemoveById` in `after.d` also works, but switches off the whole
-restricted-headers check.)
 
 ## Audit log
 
@@ -262,9 +262,11 @@ line for each one that is missing.
 
 Replace the images and keep your `VIRTUAL_HOST` backends. What differs:
 
-1. **The WAF.** It blocks attacks, and also some legitimate requests (REST methods, some upload types, large forms):
-   see [first-use false positives](#first-use-false-positives). Look for `SECURITY:` lines and 403s in the logs after
-   the move; start with `MODSEC_RULE_ENGINE=DetectionOnly` on a busy site to see the false positives before blocking.
+1. **The WAF.** It blocks attacks. Its defaults let common legitimate traffic through (REST methods, WordPress's
+   method override, `Expect`, forms up to 1 MiB), but some is still refused, such as raw-file uploads and WebDAV: see
+   [what the WAF lets through](#what-the-waf-lets-through-by-default). Look for `SECURITY:` lines and 403s in the logs
+   after the move; start with `MODSEC_RULE_ENGINE=DetectionOnly` on a busy site to see the false positives before
+   blocking.
 2. **Stricter defaults.** Timeouts are 10 s, keep-alive is 15 s (the stock `nginx.conf` has 65 s), and request bodies
    over 128 MiB are refused (nginx's own `client_max_body_size`, 1m unless you raise it for a vhost in nginx-proxy's
    usual way, refuses larger bodies first: ModSecurity's limit only applies below it).

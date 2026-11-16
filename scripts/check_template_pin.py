@@ -4,10 +4,10 @@
 Usage: check_template_pin.py [--pins PINS_ENV] [--grace-days N] [--now ISO-8601] [--fixtures DIR]
 
 Compares NGINX_PROXY_REF in pins.env with nginx-proxy's main branch on GitHub. The pin is behind when main has
-commits the pin does not have that touch nginx.tmpl, app/ or Dockerfile.dockergen (what the gen image takes from
-nginx-proxy), and the oldest of them (by commit date) is more than N days old (default 7): upstream gets a week to
-settle, and the images stay within about a week of it. Moving the pin stays a manual, reviewed change
-(docs/maintenance.md).
+commits the pin does not have that touch what the images take from nginx-proxy at the pin (gen: nginx.tmpl, app/,
+Dockerfile.dockergen; edge: network_internal.conf and the nginx.conf changes of Dockerfile.debian), and the oldest of
+them (by commit date) is more than N days old (default 7): upstream gets a week to settle, and the images stay within
+about a week of it. Moving the pin stays a manual, reviewed change (docs/maintenance.md).
 
 Prints one line per such commit (short SHA, commit date, paths) and a verdict on stdout; no commit messages.
 Exit 0 when the pin is current or the changes are younger than N days, 1 when the pin is behind, 2 on a lookup failure
@@ -26,7 +26,7 @@ from resolve_versions import ROOT, LookupError_, fetch_json, read_pins
 
 REPO = "nginx-proxy/nginx-proxy"
 BRANCH = "main"
-PATHS = ("nginx.tmpl", "app", "Dockerfile.dockergen")
+PATHS = ("nginx.tmpl", "app", "Dockerfile.dockergen", "network_internal.conf", "Dockerfile.debian")
 PER_PAGE = 100
 MAX_PAGES = 10  # per listing; more is a failure, never a silent cut
 SHA = re.compile(r"[0-9a-f]{40}")
@@ -138,10 +138,10 @@ def main():
         print(f"CHANGED {sha[:12]} {date:%Y-%m-%dT%H:%M:%SZ} {' '.join(paths)}")
     age = now - min(date for date, _ in changed.values())
     if age > grace:
-        print(f"BEHIND: {len(changed)} commits on {where} touch the template; the oldest is {age.days} days old, more "
-              f"than {args.grace_days}. Review them and move NGINX_PROXY_REF (docs/maintenance.md).")
+        print(f"BEHIND: {len(changed)} commits on {where} touch what the images use; the oldest is {age.days} days old, "
+              f"more than {args.grace_days}. Review them and move NGINX_PROXY_REF (docs/maintenance.md).")
         return 1
-    print(f"RECENT: {len(changed)} commits on {where} touch the template; the oldest is not older than "
+    print(f"RECENT: {len(changed)} commits on {where} touch what the images use; the oldest is not older than "
           f"{args.grace_days} days yet.")
     return 0
 

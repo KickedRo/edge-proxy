@@ -108,7 +108,8 @@ LOGS=$(docker logs "$RUN-invalid2" 2>&1)
 # Every value form is validated: one invalid value per form, all reported before the container stops.
 INVALID=(MODSEC_PARANOIA=5 MODSEC_ANOMALY_INBOUND=0 MODSEC_REQ_BODY_LIMIT=12ab MODSEC_AUDIT_LOG=relative.log
   MODSEC_DENY_STATUS=200 EDGE_CLIENT_HEADER_TIMEOUT=10 EDGE_LARGE_HEADER_BUFFERS=4 EDGE_SECURITY_HEADERS=yes
-  "MODSEC_ALLOWED_METHODS=GET',setvar:tx.x=1" 'MODSEC_ALLOWED_REQUEST_CONTENT_TYPE=application/json')
+  "MODSEC_ALLOWED_METHODS=GET',setvar:tx.x=1" 'MODSEC_ALLOWED_REQUEST_CONTENT_TYPE=application/json'
+  'MODSEC_RESTRICTED_HEADERS_BASIC=/Proxy/')
 ARGS=(); for kv in "${INVALID[@]}"; do ARGS+=(-e "$kv"); done
 OUT=$(docker run --rm "${ARGS[@]}" "$IMAGE" nginx -t 2>&1) && fail invalid_values_refused "accepted: $OUT"
 for kv in "${INVALID[@]}"; do
@@ -132,6 +133,13 @@ OUT=$(docker run --rm --entrypoint sh "$IMAGE" -c '. /usr/local/share/kickedro/s
   done
   for v in "|application/json|" "|application/vnd.api+json| |application/x-amz-json-1.1| |text/plain|"; do
     matches "$v" "<content-types>" || echo "refused <content-types>: [$v]"
+  done
+  for v in proxy /proxy "/Proxy/" "/proxy/  /if/" " /proxy/" "/proxy/ " /proxy/,/if/ "/pro'\''xy/" "/a/b/" "//" "/-x/" \
+    "/%{tx.x}/" "/proxy/${nl}/if/" ""; do
+    if matches "$v" "<headers>"; then echo "accepted <headers>: [$v]"; fi
+  done
+  for v in /proxy/ "/content-encoding/ /proxy/ /x-middleware-subrequest/ /expect/"; do
+    matches "$v" "<headers>" || echo "refused <headers>: [$v]"
   done' 2>&1) || fail list_forms_strict "$OUT"
 expect_eq list_forms_strict "$OUT" ''
 
@@ -145,17 +153,19 @@ pass buffers_minimum
 OUT=$(docker run --rm -e EDGE_CLIENT_HEADER_TIMEOUT=5s -e EDGE_SEND_TIMEOUT=500ms -e EDGE_LARGE_HEADER_BUFFERS='2 8k' \
   -e MODSEC_ANOMALY_INBOUND=3 -e EDGE_KEEPALIVE_TIMEOUT=0 -e MODSEC_AUDIT_LOG=/var/tmp/audit.log \
   -e MODSEC_DENY_STATUS=406 -e MODSEC_PARANOIA=2 -e MODSEC_AUDIT_FORMAT=Native -e EDGE_BLOCK_PAGE=off \
-  -e MODSEC_REQ_BODY_NOFILES_LIMIT=65536 -e MODSEC_ARGUMENTS_LIMIT=500 -e 'MODSEC_ALLOWED_METHODS=POST GET' \
+  -e MODSEC_REQ_BODY_NOFILES_LIMIT=131072 -e MODSEC_ARGUMENTS_LIMIT=1000 -e 'MODSEC_ALLOWED_METHODS=POST GET' \
   -e 'MODSEC_ALLOWED_REQUEST_CONTENT_TYPE=|application/json| |application/x-www-form-urlencoded|' \
+  -e 'MODSEC_RESTRICTED_HEADERS_BASIC=/x-middleware-subrequest/ /if/ /content-range/ /lock-token/ /proxy/ /content-encoding/ /expect/' \
   "$IMAGE" nginx -t 2>&1) || fail stricter_values_quiet "nginx -t failed: $OUT"
 expect_eq stricter_values_quiet "$(security_count "$OUT")" 0
 
 # Each weaker value prints exactly one SECURITY: line naming its variable (numbers, times and buffers compared).
 WEAK=(EDGE_CLIENT_HEADER_TIMEOUT=1m EDGE_CLIENT_BODY_TIMEOUT=11s EDGE_LARGE_HEADER_BUFFERS='4 16k'
   MODSEC_ANOMALY_INBOUND=6 MODSEC_ANOMALY_OUTBOUND=5 EDGE_KEEPALIVE_TIMEOUT=1h MODSEC_AUDIT_LOG=off
-  MODSEC_REQ_BODY_LIMIT=134217729 EDGE_HIDE_UPSTREAM_HEADERS=off MODSEC_REQ_BODY_NOFILES_LIMIT=131073
-  MODSEC_ARGUMENTS_LIMIT=1001 'MODSEC_ALLOWED_METHODS=GET HEAD POST OPTIONS PUT'
-  'MODSEC_ALLOWED_REQUEST_CONTENT_TYPE=|application/json| |text/plain|')
+  MODSEC_REQ_BODY_LIMIT=134217729 EDGE_HIDE_UPSTREAM_HEADERS=off MODSEC_REQ_BODY_NOFILES_LIMIT=1048577
+  MODSEC_ARGUMENTS_LIMIT=3001 'MODSEC_ALLOWED_METHODS=GET POST PROPFIND'
+  'MODSEC_ALLOWED_REQUEST_CONTENT_TYPE=|application/json| |text/plain|'
+  'MODSEC_RESTRICTED_HEADERS_BASIC=/content-encoding/ /lock-token/ /content-range/ /if/ /x-middleware-subrequest/ /expect/')
 ARGS=(); for kv in "${WEAK[@]}"; do ARGS+=(-e "$kv"); done
 OUT=$(docker run --rm "${ARGS[@]}" -e EDGE_RATE_ZONES=off "$IMAGE" nginx -T 2>&1) || fail weaker_values_warn "nginx -T failed: $OUT"
 expect_eq weaker_values_warn_count "$(security_count "$OUT")" "${#WEAK[@]}"
