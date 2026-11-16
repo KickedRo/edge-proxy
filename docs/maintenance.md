@@ -55,9 +55,10 @@ Two workflows, both in `.github/workflows/`:
    release (the highest published `vX.Y.Z` below this one) and its `manifest.json`, asks GitHub for the pull requests
    merged since (`scripts/release.sh notes-inputs`), and writes the notes (`scripts/release_notes.py notes`; for
    `X.Y.0` with the Upgrading note of `CHANGELOG.md`). Then `scripts/release.sh` creates the Release `vX.Y.Z` as a
-   **draft** on the built commit, uploads `manifest.json`, and publishes it, marked latest. Publishing creates the git
-   tag `vX.Y.Z` on that commit. The job is idempotent: it creates what is missing and changes nothing that exists and
-   matches (see [a failed release](#a-failed-release-release-vxyz-is-missing)).
+   **draft** on the built commit, uploads `manifest.json`, and publishes it, marked latest (unless a higher version
+   already has its Release). Publishing creates the git tag `vX.Y.Z` on that commit. The job is idempotent: it creates
+   what is missing and changes nothing that exists and matches (see
+   [a failed release](#a-failed-release-release-vxyz-is-missing)).
 5. `report` (scheduled runs): opens a "Build failed" issue when a scheduled run failed or timed out, and closes it
    when a later one passes.
 6. `keepalive` (scheduled runs): [below](#scheduled-workflows-stop-after-60-days).
@@ -138,7 +139,8 @@ with `force_publish`. The new version gets its Release; `X.Y.Z` stays without on
 **A newer version came first.** The check above runs only when a run publishes nothing. If the content changes before
 anyone re-runs the failed release job, the next run publishes `X.Y.Z+1` with its Release as usual, and `vX.Y.Z` stays
 without a Release until someone re-runs its release job (within the 30 days). The notes of `X.Y.Z+1` compare with
-the newest version that has a Release.
+the newest version that has a Release. Re-running the release job of `X.Y.Z` then publishes `vX.Y.Z` without the
+Latest marker: it stays on the newest Release, `vX.Y.Z+1`.
 
 **The publish job failed.** Before the Tag step nothing is visible: the pushed digests have no tag, and a re-run (or
 the next run) publishes the same version number. If it failed between tagging `edge` and tagging `gen`, `edge` has the

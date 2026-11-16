@@ -6,12 +6,13 @@
 #     Makes sure the Release vVERSION exists, is published and has the asset manifest.json, byte for byte MANIFEST,
 #     and that the git tag vVERSION is on COMMIT (the full commit id). What is missing is created, in an order a re-run
 #     can finish after a failure part-way: a draft Release (title vVERSION, body NOTES, target COMMIT; a draft makes no
-#     git tag), then the asset, then publication, marked latest (publishing creates the tag on COMMIT). The body is
-#     written only when the draft is created. A Release that is published and complete is left as it is. Anything
-#     that exists but differs is an error and is never changed: the tag on another commit, a draft for another commit,
-#     another manifest.json (or one whose upload did not complete), several Releases for the tag, a published Release
-#     without its tag. After a change the result is read back and checked. MANIFEST must be the manifest of VERSION and
-#     COMMIT (its "version" and "commit").
+#     git tag), then the asset, then publication (it creates the tag on COMMIT), marked latest unless a published
+#     Release vA.B.C has a higher version (then explicitly not: GitHub marks a newly published Release latest by
+#     default). The body is written only when the draft is created. A Release that is published and complete is left
+#     as it is. Anything that exists but differs is an error and is never changed: the tag on another commit, a draft
+#     for another commit, another manifest.json (or one whose upload did not complete), several Releases for the tag, a
+#     published Release without its tag. After a change the result is read back and checked. MANIFEST must be the
+#     manifest of VERSION and COMMIT (its "version" and "commit").
 #
 #   scripts/release.sh previous VERSION
 #     Prints the tag vX.Y.Z of the highest published Release below VERSION (the previous release), or nothing when
@@ -128,15 +129,22 @@ tag_commit() { # TAG: the commit the git tag TAG is on, nothing when there is no
   fi
 }
 
-inspect() { # reads the state of the Release $TAG into TAG_AT, REL_ID, REL_DRAFT, REL_ASSET; fails on what differs
+inspect() { # reads the state of the Release $TAG into TAG_AT, REL_ID, REL_DRAFT, REL_ASSET, and into NEWER the tag
+            # of the highest published vA.B.C Release above VERSION (nothing when there is none); fails on what differs
   local out n=0 tag id draft asset target
   TAG_AT=$(tag_commit "$TAG") || exit 1
   [ -z "$TAG_AT" ] || [ "$TAG_AT" = "$COMMIT" ] \
     || die "the tag $TAG is on commit $TAG_AT, not on $COMMIT (a version tag never moves)"
   out=$(releases) || die "cannot list the Releases of $GH_REPO"
-  REL_ID='' REL_DRAFT='' REL_ASSET=''
+  REL_ID='' REL_DRAFT='' REL_ASSET='' NEWER=''
   while IFS=$'\t' read -r tag id draft asset target; do
-    [ "$tag" = "$TAG" ] || continue
+    if [ "$tag" != "$TAG" ]; then
+      if [ "$draft" = false ] && [[ ${tag#v} =~ $VERSION_RE ]] && [ "$tag" != "${tag#v}" ] \
+        && version_lt "$VERSION" "${tag#v}" && { [ -z "$NEWER" ] || version_lt "${NEWER#v}" "${tag#v}"; }; then
+        NEWER=$tag
+      fi
+      continue
+    fi
     n=$((n + 1))
     REL_ID=$id REL_DRAFT=$draft REL_ASSET=$asset
     if [ "$draft" = true ] && [ "$target" != "$COMMIT" ]; then
@@ -163,7 +171,7 @@ inspect() { # reads the state of the Release $TAG into TAG_AT, REL_ID, REL_DRAFT
 release() {
   [ $# -eq 4 ] || usage
   VERSION=$1 COMMIT=$2
-  local manifest=$3 notes=$4 changed=false
+  local manifest=$3 notes=$4 changed=false latest
   check_version "$VERSION"
   check_commit "$COMMIT"
   check_repo
@@ -186,8 +194,14 @@ release() {
     changed=true
   fi
   if [ "$REL_DRAFT" = true ]; then
-    echo "publishing $TAG, marked latest (creates the tag $TAG on $COMMIT)" >&2
-    gh release edit "$TAG" --draft=false --latest >&2 || die "cannot publish $TAG"
+    if [ -z "$NEWER" ]; then
+      echo "publishing $TAG, marked latest (creates the tag $TAG on $COMMIT)" >&2
+      latest=--latest
+    else # an older version completed late: the Latest marker stays on the highest version
+      echo "publishing $TAG, not marked latest: $NEWER is a higher version (creates the tag $TAG on $COMMIT)" >&2
+      latest=--latest=false
+    fi
+    gh release edit "$TAG" --draft=false "$latest" >&2 || die "cannot publish $TAG"
     changed=true
   fi
   if [ "$changed" = true ]; then

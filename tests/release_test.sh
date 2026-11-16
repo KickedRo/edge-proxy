@@ -22,7 +22,7 @@ mkdir "$TMP/bin" "$TMP/in"
 cat > "$TMP/bin/gh" <<'FAKE'
 #!/usr/bin/env bash
 # Fake gh. State in $FAKE_GH_STATE: releases.json (the Releases as the REST API lists them), assets/<release id>/<name>
-# (asset bytes), tags/<tag> (the git ref as the REST API returns it), latest (the tag last marked latest), fail_ref
+# (asset bytes), tags/<tag> (the git ref as the REST API returns it), latest (the tag marked latest), fail_ref
 # (when present, the ref lookup fails like a GitHub outage), fail_upload (when present, an upload is cut off). Each
 # call goes to calls.log in a short canonical form; an unknown call goes to unexpected.log and exits 99.
 set -euo pipefail
@@ -98,16 +98,17 @@ elif [ $# -eq 4 ] && [ "$1 $2" = "release upload" ]; then
   fi
   mkdir -p "$S/assets/$id"
   cp "$4" "$S/assets/$id/$name"
-elif [ $# -eq 5 ] && [ "$1 $2" = "release edit" ] && [ "$4 $5" = "--draft=false --latest" ]; then
+elif [ $# -eq 5 ] && [ "$1 $2" = "release edit" ] && [ "$4" = --draft=false ] \
+  && { [ "$5" = --latest ] || [ "$5" = --latest=false ]; }; then
   id=$(release_id "$3")
-  log "publish $3 latest"
+  if [ "$5" = --latest ]; then log "publish $3 latest"; else log "publish $3 not-latest"; fi
   target=$(jq -r --argjson id "$id" '.[] | select(.id == $id) | .target_commitish' "$S/releases.json")
   edit 'map(if .id == $id then .draft = false else . end)' --argjson id "$id"
   if [ ! -f "$S/tags/$3" ]; then # publishing creates the tag at the target; an existing tag stays as it is
     jq -n --arg t "$3" --arg c "$target" '{ref: ("refs/tags/" + $t), object: {type: "commit", sha: $c}}' \
       > "$S/tags/$3"
   fi
-  echo "$3" > "$S/latest"
+  [ "$5" = --latest=false ] || echo "$3" > "$S/latest" # --latest=false leaves the marker where it is
   echo "https://github.com/example/edge-proxy/releases/tag/$3"
 elif [ $# -eq 7 ] && [ "$1 $2" = "release download" ] && [ "$4 $5 $6" = "--pattern manifest.json --dir" ]; then
   id=$(release_id "$3")
@@ -179,16 +180,17 @@ refused() { # NAME TEXT: failed (status 1) with TEXT in the message
   [ "$status" -eq 1 ] || fail "$1" "exit status $status, expected 1"
   grep -qF -- "$2" "$TMP/err" || fail "$1" "no '$2' in the message"
 }
-complete() { # NAME BODY_FILE: one Release v0.1.0, published, marked latest, title v0.1.0, body BODY_FILE, git tag on
-             # A, one asset manifest.json equal to M
-  local name=$1 body=$2 r id
+complete() { # NAME BODY_FILE [LATEST]: one Release v0.1.0, published, title v0.1.0, body BODY_FILE, git tag on A,
+             # one asset manifest.json equal to M; the Release marked latest is LATEST (default v0.1.0)
+  local name=$1 body=$2 latest=${3:-v0.1.0} r id
   [ "$(jq '[.[] | select(.tag_name == "v0.1.0")] | length' "$S/releases.json")" = 1 ] \
     || fail "$name" "not exactly one Release v0.1.0: $(jq -c . "$S/releases.json")"
   r=$(jq -c '.[] | select(.tag_name == "v0.1.0")' "$S/releases.json")
   [ "$(jq -r .draft <<<"$r")" = false ] || fail "$name" "the Release is still a draft"
   [ "$(jq -r .name <<<"$r")" = v0.1.0 ] || fail "$name" "title $(jq .name <<<"$r")"
   jq -j .body <<<"$r" | cmp -s - "$body" || fail "$name" "body $(jq .body <<<"$r"), expected the text of $body"
-  [ "$(cat "$S/latest" 2>/dev/null)" = v0.1.0 ] || fail "$name" "v0.1.0 is not marked latest"
+  [ "$(cat "$S/latest" 2>/dev/null)" = "$latest" ] \
+    || fail "$name" "the Release marked latest is '$(cat "$S/latest" 2>/dev/null)', expected $latest"
   [ "$(jq -r '.object.type + " " + .object.sha' "$S/tags/v0.1.0" 2>/dev/null)" = "commit $A" ] \
     || fail "$name" "the git tag v0.1.0 is not on $A"
   [ "$(jq -c '[.assets[] | [.name, .state]]' <<<"$r")" = '[["manifest.json","uploaded"]]' ] \
@@ -242,6 +244,38 @@ calls_are rerun_of_published_release_changes_nothing "${read_back[@]}"
 [ "$(snapshot)" = "$before" ] || fail rerun_of_published_release_changes_nothing "the repository state changed"
 complete rerun_of_published_release_changes_nothing "$OLD_NOTES"
 pass rerun_of_published_release_changes_nothing
+
+# Only a published vA.B.C above the version takes the Latest marker: drafts, lower versions and other tags do not.
+reset
+for tag in v0.0.9 v0.1.0-rc1 v0.2.0-rc1 vnext 0.2.0; do
+  draft "$tag" "$B"
+  publish "$tag"
+done
+draft v0.1.1 "$B" # a draft of a higher version is not a release (yet)
+setup_done
+run 0.1.0 "$A" "$M" "$NOTES"
+succeeded marks_latest_without_a_higher_release
+calls_are marks_latest_without_a_higher_release "${first_attempt[@]}" "create v0.1.0 draft target=$A title=v0.1.0" \
+  "upload v0.1.0 manifest.json" "publish v0.1.0 latest" "${read_back[@]}"
+complete marks_latest_without_a_higher_release "$NOTES"
+pass marks_latest_without_a_higher_release
+
+# The release job of 0.1.0 failed (its draft is left) and 0.1.1 was released before anyone re-ran it: the re-run
+# completes 0.1.0 and leaves the Latest marker on 0.1.1 (GitHub would move it to 0.1.0 without --latest=false).
+reset
+draft v0.1.0 "$A"
+draft v0.1.1 "$B"
+upload v0.1.1 "$PREV"
+publish v0.1.1
+setup_done
+run 0.1.0 "$A" "$M" "$NOTES"
+succeeded rerun_of_older_version_keeps_latest
+calls_are rerun_of_older_version_keeps_latest "${first_attempt[@]}" "upload v0.1.0 manifest.json" \
+  "publish v0.1.0 not-latest" "${read_back[@]}"
+complete rerun_of_older_version_keeps_latest "$OLD_NOTES" v0.1.1
+grep -qF "not marked latest: v0.1.1 is a higher version" "$TMP/err" \
+  || fail rerun_of_older_version_keeps_latest "no reason in the log"
+pass rerun_of_older_version_keeps_latest
 
 # A published Release without manifest.json (not made by this script): the asset is what is missing.
 reset

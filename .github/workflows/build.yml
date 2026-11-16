@@ -447,11 +447,12 @@ jobs:
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
   # The GitHub Release vX.Y.Z of what the publish job published (scripts/release.sh): a draft with the notes, the
-  # asset manifest.json, then publication, marked latest, which creates the git tag vX.Y.Z on the built commit. The
-  # only job with contents: write, and it gets no registry credentials. The notes compare the manifest with the
-  # previous release's and list the pull requests merged since (GitHub's generated notes). A failure leaves the run
-  # red (and opens the "Build failed" issue on a scheduled run); "Re-run failed jobs" finishes the Release: the script
-  # creates what is missing and refuses, without changing anything, what exists but differs.
+  # asset manifest.json, then publication (marked latest unless a higher version already has a Release), which creates
+  # the git tag vX.Y.Z on the built commit. The only job with contents: write, and it gets no registry credentials.
+  # The notes compare the manifest with the previous release's and list the pull requests merged since (GitHub's
+  # generated notes). A failure leaves the run red (and opens the "Build failed" issue on a scheduled run); "Re-run
+  # failed jobs" finishes the Release: the script creates what is missing and refuses, without changing anything, what
+  # exists but differs.
   release:
     needs: [build-test, publish]
     if: needs.publish.outputs.published == 'true'
