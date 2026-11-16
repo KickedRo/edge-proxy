@@ -46,6 +46,12 @@ server {
         proxy_pass http://backend:80;
         proxy_set_header Host $host;
     }
+    # HTTP/1.1 to the backend, as nginx-proxy's template proxies.
+    location /h11/ {
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_pass http://backend:80/;
+    }
 }
 CONF
 # 20 MB of random letters (base64 of random bytes, digits and symbols removed).
@@ -56,12 +62,15 @@ head -c 20000000 "$WORK/upload.full" > "$WORK/upload.txt"
 rm -f "$WORK/upload.full"
 [ "$(stat -c %s "$WORK/upload.txt")" -ge 20000000 ] || fail setup "could not generate the upload file"
 chmod 644 "$WORK/upload.txt"
-# Request bodies without attack content that hit ModSecurity's own limits: 230 KB of form data (the limit without files
-# is 128 KiB), a form with 1000 fields (the argument limit), and one with 999.
-{ printf 'a='; head -c 230000 /dev/zero | tr '\0' a; } > "$WORK/form-230k.txt"
+# Request bodies without attack content at ModSecurity's own limits: form data of exactly 1 MiB (the limit without
+# files, nginx's default client_max_body_size) and one byte more, a form with 3000 fields (the argument limit) and one
+# with 2999.
+form() { printf 'a='; head -c $(($1 - 2)) /dev/zero | tr '\0' a; } # bytes -> a form body of that size
+form 1048576 > "$WORK/form-1m.txt"
+form 1048577 > "$WORK/form-over-1m.txt"
 fields() { seq -s '&' 0 $(($1 - 1)) | sed 's/[0-9][0-9]*/f&=1/g'; }
-fields 1000 > "$WORK/form-1000.txt"
-fields 999 > "$WORK/form-999.txt"
+fields 3000 > "$WORK/form-3000.txt"
+fields 2999 > "$WORK/form-2999.txt"
 chmod 644 "$WORK"/form-*.txt
 # A tiny OWASP CRS plugin: proves the plugins mount loads *-config.conf, then *-before.conf before the CRS rules, then
 # *-after.conf after them. Each phase-1 rule appends a letter: b only before the CRS's initialisation has run (its
@@ -186,8 +195,10 @@ for id in 949110 949111 959100 959101; do
 done
 pass crs_blocking_rules
 
-# The CRS policy settings default to the built CRS's own lists (rules 901160 and 901162 of REQUEST-901-INITIALIZATION.conf
-# set them when nothing else has): a CRS release that changes them fails here, so settings.tsv follows on purpose.
+# The CRS policy settings follow the built CRS's own lists (rules 901160, 901162 and 901165 of
+# REQUEST-901-INITIALIZATION.conf set them when nothing else has), with the image's documented differences: methods
+# plus PUT PATCH DELETE, restricted headers without the three method-override headers and Expect. A CRS release that
+# changes its lists fails here, so settings.tsv follows on purpose.
 CRS_INIT=$(docker run --rm --entrypoint cat "$IMAGE" /etc/nginx/modsec/crs/rules/REQUEST-901-INITIALIZATION.conf) \
   || fail crs_policy_defaults "cannot read the CRS's initialisation rules"
 SETTINGS=$(docker run --rm --entrypoint cat "$IMAGE" /usr/local/share/kickedro/settings.tsv) \
@@ -201,13 +212,25 @@ crs_default() { # rule-id tx-variable -> the value that CRS rule sets
       exit
     }' <<<"$CRS_INIT"
 }
-for check in 901160:allowed_methods:MODSEC_ALLOWED_METHODS \
-  901162:allowed_request_content_type:MODSEC_ALLOWED_REQUEST_CONTENT_TYPE; do
-  IFS=: read -r id var setting <<<"$check"
-  CRS=$(crs_default "$id" "$var")
-  [ -n "$CRS" ] || fail crs_policy_defaults "rule $id does not set tx.$var in the CRS; update edge/settings.tsv and this test"
-  expect_eq "crs_policy_default_$var" "$(awk -F '\t' -v v="$setting" '$1 == v { print $2 }' <<<"$SETTINGS")" "$CRS"
-done
+without() { # list items -> the list without exactly these items, each of which it must have (else nothing)
+  awk -v list="$1" -v drop="$2" 'BEGIN {
+    n = split(list, l, " "); m = split(drop, d, " ")
+    for (j = 1; j <= m; j++) gone[d[j]] = 0
+    for (i = 1; i <= n; i++) if (l[i] in gone) gone[l[i]]++; else out = out (out == "" ? "" : " ") l[i]
+    for (j = 1; j <= m; j++) if (gone[d[j]] != 1) exit
+    print out }'
+}
+setting_default() { awk -F '\t' -v v="$1" '$1 == v { print $2 }' <<<"$SETTINGS"; }
+METHODS=$(crs_default 901160 allowed_methods)
+TYPES=$(crs_default 901162 allowed_request_content_type)
+HEADERS=$(crs_default 901165 restricted_headers_basic)
+[ -n "$METHODS" ] && [ -n "$TYPES" ] && [ -n "$HEADERS" ] \
+  || fail crs_policy_defaults "a CRS default list was not found; update edge/settings.tsv and this test"
+expect_eq crs_policy_default_allowed_methods "$(setting_default MODSEC_ALLOWED_METHODS)" "$METHODS PUT PATCH DELETE"
+expect_eq crs_policy_default_allowed_request_content_type "$(setting_default MODSEC_ALLOWED_REQUEST_CONTENT_TYPE)" "$TYPES"
+EXPECTED=$(without "$HEADERS" '/x-http-method-override/ /x-http-method/ /x-method-override/ /expect/')
+[ -n "$EXPECTED" ] || fail crs_policy_default_restricted_headers_basic "the CRS list lacks a header the image leaves out: $HEADERS"
+expect_eq crs_policy_default_restricted_headers_basic "$(setting_default MODSEC_RESTRICTED_HEADERS_BASIC)" "$EXPECTED"
 
 # User templates keep working: the official NGINX_ENVSUBST_* mechanism is untouched.
 mkdir -p "$WORK/usertpl"
@@ -256,10 +279,21 @@ done
 
 expect_eq body_sqli_on "$(status "http://$RUN-on/" --data-urlencode 'id=1 UNION SELECT password FROM users')" 403
 
-# 20 MB multipart/form-data file upload of letters: ModSecurity's body limits must not refuse it.
-# (The Expect header is cleared to emulate a browser upload: browsers never send "Expect: 100-continue", but
-# curl adds it to large uploads and CRS 4 blocks it by default, rule 920450, as an anti-desync measure.)
-expect_eq large_upload "$(docker cp "$WORK/upload.txt" "$CLIENT:/tmp/upload.txt" >/dev/null && status "http://$RUN-on/" -H 'Expect:' -F 'file=@/tmp/upload.txt;type=application/octet-stream' --max-time 120)" 200
+# 20 MB multipart/form-data file upload of letters: ModSecurity's body limits must not refuse it. curl sends
+# "Expect: 100-continue" with it, which the image allows by default (see expect_not_forwarded).
+expect_eq large_upload "$(docker cp "$WORK/upload.txt" "$CLIENT:/tmp/upload.txt" >/dev/null && status "http://$RUN-on/" -H 'Expect: 100-continue' -F 'file=@/tmp/upload.txt;type=application/octet-stream' --max-time 120)" 200
+
+# Expect is allowed by default because nginx answers "100 Continue" itself and does not forward the header to the
+# backend, so it cannot desync the backend connection (the reason the CRS blocks it). whoami echoes the request it
+# got: the probe header is there, Expect is not (both through nginx's default proxying and HTTP/1.1 keep-alive
+# proxying, as nginx-proxy's template uses; tests/split_smoke.sh checks the generated configuration too).
+for path in / /h11/; do
+  ECHO=$(docker exec "$CLIENT" curl -s -g --max-time 10 -H 'Host: app.example.com' -H 'X-Probe: expect-test' \
+    -H 'Expect: 100-continue' --data 'a=1' "http://$RUN-on$path" || true)
+  grep -qx 'X-Probe: expect-test' <<<"${ECHO//$'\r'/}" || fail expect_not_forwarded "not whoami's echo for $path: $ECHO"
+  ! grep -qi '^Expect:' <<<"$ECHO" || fail expect_not_forwarded "the backend got Expect through $path: $ECHO"
+done
+pass expect_not_forwarded
 
 # JSON bodies are parsed and inspected.
 expect_eq body_json_sqli_on "$(status "http://$RUN-on/" -H 'Content-Type: application/json' --data '{"id":"1 UNION SELECT password FROM users"}')" 403
@@ -326,56 +360,59 @@ edge emptydirs -e MODSEC_RULE_ENGINE=On -v "$WORK/empty-custom:/etc/nginx/modsec
 expect_eq empty_mounts_block "$(status "http://$RUN-emptydirs$XSS")" 403
 
 # A custom.d rule is loaded (site exclusions go there). The other two files are the per-site snippets of
-# docs/configuration.md ("First-use false positives"), word for word.
+# docs/configuration.md ("Allowed by default" and "Still blocked by default"), word for word.
 mkdir -p "$WORK/custom"
 echo 'SecRule REQUEST_URI "@beginsWith /custom-test" "id:10100,phase:1,pass,nolog,ctl:ruleEngine=Off"' > "$WORK/custom/site.conf"
-cat > "$WORK/custom/method-override.conf" <<'RULES'
-SecRule REQUEST_HEADERS:Host "@streq app.example.com" \
-    "id:10110,\
-    phase:1,\
-    pass,\
-    nolog,\
-    setvar:'tx.restricted_headers_basic=/content-encoding/ /proxy/ /lock-token/ /content-range/ /if/ /x-http-method/ /x-method-override/ /x-middleware-subrequest/ /expect/'"
-RULES
-cat > "$WORK/custom/api-methods.conf" <<'RULES'
+cat > "$WORK/custom/app-methods.conf" <<'RULES'
 SecRule REQUEST_HEADERS:Host "@streq app.example.com" \
     "id:10120,\
     phase:1,\
     pass,\
     nolog,\
-    setvar:'tx.allowed_methods=GET HEAD POST OPTIONS PUT PATCH DELETE'"
+    setvar:'tx.allowed_methods=GET HEAD POST OPTIONS'"
+RULES
+cat > "$WORK/custom/dav-octet-stream.conf" <<'RULES'
+SecRule REQUEST_HEADERS:Host "@streq dav.example.com" "id:10130,phase:1,pass,nolog,setvar:'tx.allowed_request_content_type=%{tx.allowed_request_content_type} |application/octet-stream|'"
 RULES
 chmod -R a+rX "$WORK/custom"
 edge custom -e MODSEC_RULE_ENGINE=On -v "$WORK/custom:/etc/nginx/modsec/custom.d:ro"
 expect_eq custom_d_loaded "$(status "http://$RUN-custom/custom-test?q=<script>alert(1)</script>")" 200
 
-# ---- first-use false positives (docs/configuration.md): the CRS's default policy and ModSecurity's body limits -----
-# Methods other than GET HEAD POST OPTIONS (911100), body types outside the allowed list (920420) and method-override
-# headers (920450) are refused by default; the settings and the snippet above let them through.
-WP_POST=(-H 'Content-Type: application/json' --data '{"title":"hello"}')
+# ---- the image's default policy (docs/configuration.md, "Allowed by default" / "Still blocked by default") ---------
+# Allowed by default, unlike the CRS's own lists: PUT PATCH DELETE (911100) and the method-override header (920450).
+# Still refused: other methods, body types outside the CRS's list (920420), the other restricted headers (920450).
+JSON_BODY=(-H 'Content-Type: application/json' --data '{"title":"hello"}')
+on_host() { # host url [curl args...] -> status of a request with that Host header
+  local h=$1 u=$2; shift 2
+  docker exec "$CLIENT" curl -s -g -o /dev/null -w '%{http_code}' --max-time 10 -H "Host: $h" "$@" "$u" || true
+}
 for m in PUT PATCH DELETE; do
-  expect_eq "method_${m,,}_refused" "$(status "http://$RUN-on/api/x" -X "$m" "${WP_POST[@]}")" 403
+  expect_eq "method_${m,,}_allowed" "$(status "http://$RUN-on/api/x" -X "$m" "${JSON_BODY[@]}")" 200
 done
+expect_eq method_override_allowed "$(status "http://$RUN-on/wp-json/wp/v2/posts/1" -H 'X-HTTP-Method-Override: PUT' "${JSON_BODY[@]}")" 200
+expect_eq method_propfind_refused "$(status "http://$RUN-on/dav/f" -X PROPFIND)" 403
 expect_eq octet_stream_refused "$(status "http://$RUN-on/dav/f" -X PUT -H 'Content-Type: application/octet-stream' --data-binary 'abc')" 403
-expect_eq method_override_refused "$(status "http://$RUN-on/wp-json/wp/v2/posts/1" -H 'X-HTTP-Method-Override: PUT' "${WP_POST[@]}")" 403
-edge policy -e 'MODSEC_ALLOWED_METHODS=GET HEAD POST OPTIONS PUT PATCH DELETE' \
+expect_eq restricted_header_refused "$(status "http://$RUN-on/" -H 'X-Middleware-Subrequest: middleware')" 403
+# Tightened back to the CRS's own lists with the settings: the same requests are refused.
+edge strict -e 'MODSEC_ALLOWED_METHODS=GET HEAD POST OPTIONS' \
+  -e "MODSEC_RESTRICTED_HEADERS_BASIC=$HEADERS"
+expect_eq method_put_tightened "$(status "http://$RUN-strict/api/x" -X PUT "${JSON_BODY[@]}")" 403
+expect_eq method_override_tightened "$(status "http://$RUN-strict/" -H 'X-HTTP-Method-Override: PUT' "${JSON_BODY[@]}")" 403
+expect_eq expect_tightened "$(status "http://$RUN-strict/" -H 'Expect: 100-continue' --data 'a=1')" 403
+# Loosened with the settings: other methods and body types pass.
+edge policy -e 'MODSEC_ALLOWED_METHODS=GET HEAD POST OPTIONS PUT PATCH DELETE PROPFIND' \
   -e 'MODSEC_ALLOWED_REQUEST_CONTENT_TYPE=|application/x-www-form-urlencoded| |multipart/form-data| |text/xml| |application/xml| |application/soap+xml| |application/json| |application/octet-stream|'
-for m in PUT PATCH DELETE; do
-  expect_eq "method_${m,,}_allowed" "$(status "http://$RUN-policy/api/x" -X "$m" "${WP_POST[@]}")" 200
-done
+expect_eq method_propfind_allowed "$(status "http://$RUN-policy/dav/f" -X PROPFIND)" 200
 expect_eq octet_stream_allowed "$(status "http://$RUN-policy/dav/f" -X PUT -H 'Content-Type: application/octet-stream' --data-binary 'abc')" 200
-expect_eq method_still_refused "$(status "http://$RUN-policy/dav/f" -X PROPFIND)" 403
-expect_eq method_override_snippet "$(status "http://$RUN-custom/wp-json/wp/v2/posts/1" -H 'X-HTTP-Method-Override: PUT' "${WP_POST[@]}")" 200
-expect_eq method_override_snippet_other_host "$(docker exec "$CLIENT" curl -s -o /dev/null -w '%{http_code}' \
-  -H 'Host: other.example.com' -H 'X-HTTP-Method-Override: PUT' "${WP_POST[@]}" "http://$RUN-custom/wp-json/wp/v2/posts/1" \
-  || true)" 403
-expect_eq method_override_snippet_keeps_others "$(status "http://$RUN-custom/" -H 'X-HTTP-Method: PUT' --data 'a=1')" 403
-expect_eq methods_snippet "$(status "http://$RUN-custom/api/x" -X DELETE)" 200
-expect_eq methods_snippet_other_host "$(docker exec "$CLIENT" curl -s -o /dev/null -w '%{http_code}' -X DELETE \
-  -H 'Host: other.example.com' "http://$RUN-custom/api/x" || true)" 403
+# The per-site snippets: methods tightened on app.example.com only, octet-stream bodies allowed on dav.example.com only.
+expect_eq methods_snippet "$(status "http://$RUN-custom/api/x" -X DELETE)" 403
+expect_eq methods_snippet_other_host "$(on_host other.example.com "http://$RUN-custom/api/x" -X DELETE)" 200
+expect_eq content_type_snippet "$(on_host dav.example.com "http://$RUN-custom/f" -X PUT -H 'Content-Type: application/octet-stream' --data-binary 'abc')" 200
+expect_eq content_type_snippet_other_host "$(on_host other.example.com "http://$RUN-custom/f" -X PUT -H 'Content-Type: application/octet-stream' --data-binary 'abc')" 403
 
 # A body over the limit without files, and a form that reaches the argument limit, get the deny status and the block
-# page, whose reference is the audit entry of the body check (rules 200002 and 200007); 999 fields pass.
+# page, whose reference is the audit entry of the body check (rules 200002 and 200007); exactly 1 MiB and 2999 fields
+# pass.
 block_page_for_rule() { # name rule-id marker body-file -> the deny status, the block page and that rule in the audit entry
   local name=$1 rule=$2 marker=$3 file=$4 resp code id entry
   docker cp "$WORK/$file" "$CLIENT:/tmp/$file" >/dev/null
@@ -392,13 +429,14 @@ block_page_for_rule() { # name rule-id marker body-file -> the deny status, the 
     || fail "$name" "the audit entry for $id has no rule $rule: $entry"
   pass "$name"
 }
-block_page_for_rule body_over_nofiles_limit 200002 bl1 form-230k.txt
-block_page_for_rule arguments_limit 200007 bl2 form-1000.txt
-docker cp "$WORK/form-999.txt" "$CLIENT:/tmp/form-999.txt" >/dev/null
-expect_eq arguments_below_limit "$(status "http://$RUN-on/" -H 'Expect:' --data-binary @/tmp/form-999.txt)" 200
-edge limits -e MODSEC_REQ_BODY_NOFILES_LIMIT=262144 -e MODSEC_ARGUMENTS_LIMIT=1001
-expect_eq body_nofiles_limit_raised "$(status "http://$RUN-limits/" -H 'Expect:' --data-binary @/tmp/form-230k.txt)" 200
-expect_eq arguments_limit_raised "$(status "http://$RUN-limits/" -H 'Expect:' --data-binary @/tmp/form-1000.txt)" 200
+block_page_for_rule body_over_nofiles_limit 200002 bl1 form-over-1m.txt
+block_page_for_rule arguments_limit 200007 bl2 form-3000.txt
+for f in form-1m form-2999; do docker cp "$WORK/$f.txt" "$CLIENT:/tmp/$f.txt" >/dev/null; done
+expect_eq body_at_nofiles_limit "$(status "http://$RUN-on/" -H 'Expect:' --data-binary @/tmp/form-1m.txt)" 200
+expect_eq arguments_below_limit "$(status "http://$RUN-on/" -H 'Expect:' --data-binary @/tmp/form-2999.txt)" 200
+edge limits -e MODSEC_REQ_BODY_NOFILES_LIMIT=2097152 -e MODSEC_ARGUMENTS_LIMIT=3001
+expect_eq body_nofiles_limit_raised "$(status "http://$RUN-limits/" -H 'Expect:' --data-binary @/tmp/form-over-1m.txt)" 200
+expect_eq arguments_limit_raised "$(status "http://$RUN-limits/" -H 'Expect:' --data-binary @/tmp/form-3000.txt)" 200
 
 # CRS plugins: the test plugin's files run in the CRS's order (config, before, the CRS rules, after).
 edge plugins -v "$WORK/plugins:/etc/nginx/modsec/plugins:ro"

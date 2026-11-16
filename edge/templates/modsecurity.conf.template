@@ -68,9 +68,10 @@ SecAction \
     setvar:tx.inbound_anomaly_score_threshold=${MODSEC_ANOMALY_INBOUND},\
     setvar:tx.outbound_anomaly_score_threshold=${MODSEC_ANOMALY_OUTBOUND}"
 
-# CRS policy: the allowed request methods (rule 911100) and request body content types (rule 920420). The CRS's
-# REQUEST-901-INITIALIZATION.conf sets its own defaults only when these are not set yet; the settings' defaults are
-# the same lists (tests/edge_smoke.sh compares them with the built CRS).
+# CRS policy: the allowed request methods (rule 911100), request body content types (rule 920420) and the restricted
+# request headers (rule 920450). The CRS's REQUEST-901-INITIALIZATION.conf sets its own defaults only when these are
+# not set yet. The settings' defaults are the CRS's lists, except: methods plus PUT PATCH DELETE, headers without the
+# method-override headers and Expect (tests/edge_smoke.sh compares them with the built CRS).
 SecAction \
     "id:900200,\
     phase:1,\
@@ -86,3 +87,11 @@ SecAction \
     t:none,\
     nolog,\
     setvar:'tx.allowed_request_content_type=${MODSEC_ALLOWED_REQUEST_CONTENT_TYPE}'"
+
+SecAction \
+    "id:900250,\
+    phase:1,\
+    pass,\
+    t:none,\
+    nolog,\
+    setvar:'tx.restricted_headers_basic=${MODSEC_RESTRICTED_HEADERS_BASIC}'"

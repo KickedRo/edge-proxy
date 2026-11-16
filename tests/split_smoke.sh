@@ -155,6 +155,14 @@ grep -q '^NOTICE: /etc/nginx/conf.d/my_proxy.conf:1 sets "server_tokens off"' <<
 head -c 2000000 /dev/zero | tr '\0' a > "$WORK/upload.txt"
 expect_eq proxy_wide_file "$(https_status / -H 'Expect:' -F "file=@$WORK/upload.txt;type=application/octet-stream")" 200
 
+# Expect is allowed by default because it stays at the edge: an upload with "Expect: 100-continue" over HTTP/1.1
+# passes, and whoami's echo of the request it got through the generated vhost has the probe header but no Expect.
+expect_eq expect_upload "$(https_status / --http1.1 -H 'Expect: 100-continue' -F "file=@$WORK/upload.txt;type=application/octet-stream")" 200
+ECHO=$(curl -s -k --http1.1 --max-time 10 --resolve "app.example.com:$HTTPS_HOST_PORT:127.0.0.1" -H 'X-Probe: expect-test' \
+  -H 'Expect: 100-continue' --data 'a=1' "https://app.example.com:$HTTPS_HOST_PORT/" || true)
+grep -qx 'X-Probe: expect-test' <<<"${ECHO//$'\r'/}" || fail expect_not_forwarded "not whoami's echo: $ECHO"
+! grep -qi '^Expect:' <<<"$ECHO" && pass expect_not_forwarded || fail expect_not_forwarded "the backend got Expect: $ECHO"
+
 # The edge's hardening reaches the generated vhosts. headers.example.com's backend sends version headers of its own;
 # its generated HTTPS server block adds HSTS (an add_header of its own, which by default drops the http-level ones).
 headers_https_is_200() { https_request headers.example.com /; [ "$STATUS" = 200 ]; }

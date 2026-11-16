@@ -17,6 +17,7 @@ ROWS = [
     ("BETA_LIMIT", "5", "<integer>", ">5", "More beta gets through.", "Limits beta.", "For sites with much beta."),
     ("GAMMA_STATUS", "403", "403|406", "-", "No security effect.", "Status for gamma.", "To match a client."),
     ("DELTA_LIST", "|a/b| |c/d|", "<content-types>", "+", "More delta is accepted.", "Lists delta.", "For delta."),
+    ("EPSILON_LIST", "/a/ /b/", "<headers>", "<", "Less epsilon is refused.", "Blocks epsilon.", "For epsilon."),
 ]
 FIXTURE = "# A comment line, then an empty line.\n\n" + "".join("\t".join(r) + "\n" for r in ROWS)
 
@@ -51,6 +52,7 @@ class GenSettingsDoc(unittest.TestCase):
         self.assertIn("any item that the default does not have", body[3])
         # A | in a value is escaped, so it does not end the table cell.
         self.assertIn("`\\|a/b\\| \\|c/d\\|`", body[3])
+        self.assertIn("any item of the default left out", body[4])
 
     def test_missing_risk_text_fails(self):
         r = run(FIXTURE.replace("More beta gets through.", ""))
