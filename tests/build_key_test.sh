@@ -44,7 +44,7 @@ again=$(key "$VERSIONS" "$EDGE" "$EDGE_MD" "$GEN" "$GEN_MD")
 [ "$again" = "$base" ] || fail deterministic "$base then $again"
 pass format_and_deterministic
 
-for p in edge gen pins.env .github/workflows/build.yml; do
+for p in edge gen pins.env .github/workflows/build.yml LICENSE NOTICE; do
   id=$(git -C "$ROOT" rev-parse --verify "HEAD:$p")
   grep -qxF "$p $id" "$TMP/inputs" || fail source_in_inputs "no line '$p $id'"
 done

@@ -32,6 +32,7 @@ RUN set -eux; \
 # mode refuses a module root without Go files, which docker-gen's is), and every module finding that
 # has a fixed version gets exactly that version (the lowest one that fixes all its findings, never a new major).
 # Findings without a fix, and the Go standard library (which follows GO_VERSION), are left to the Trivy gate in CI.
+# (jq writes to a file before sort: /bin/sh has no pipefail, so a jq failure in a pipe would go unnoticed.)
 # Then docker-gen's own tests must pass and the binary is built. SECURITY_EPOCH (the UTC date, from CI) is only
 # declared here so this step re-runs daily with the then-current vulnerability database; every layer before it
 # stays cached.
@@ -45,7 +46,8 @@ RUN set -eux; \
     cd /src; \
     govulncheck -scan package -format json ./... > /tmp/vulns.json; \
     jq -r 'select(.finding) | .finding | select((.fixed_version // "") != "") | .trace[0] \
-           | select(.module != "stdlib" and .module != "toolchain") | .module' /tmp/vulns.json | sort -u > /tmp/modules; \
+           | select(.module != "stdlib" and .module != "toolchain") | .module' /tmp/vulns.json > /tmp/modules.all; \
+    sort -u /tmp/modules.all > /tmp/modules; \
     echo "--- modules with fixable vulnerabilities: $(wc -l < /tmp/modules)"; \
     while read -r mod; do \
         fixed="$(jq -r --arg m "$mod" 'select(.finding) | .finding | select(.trace[0].module == $m and (.fixed_version // "") != "") \
