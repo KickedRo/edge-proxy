@@ -4,9 +4,9 @@ Mount a directory of `*.conf` files at `/etc/nginx/modsec/custom.d` in the `edge
 `examples/docker-compose.yml`). The files are loaded **before** the OWASP Core Rule Set, so an exclusion written
 here is in place when the rule runs. Files that must come after the rules (`SecRuleRemoveById`, response
 exclusions) go in `/etc/nginx/modsec/after.d` instead. An empty or missing directory is fine. The configuration
-guide has the [full picture](../../docs/configuration.md#mount-points-for-your-own-rules-and-config), and the usual
-[first-use false positives](../../docs/configuration.md#first-use-false-positives) (REST methods, upload types,
-WordPress's method override, large forms) with their settings and files.
+guide has the [full picture](../../docs/configuration.md#mount-points-for-your-own-rules-and-config), and
+[what the WAF lets through by default](../../docs/configuration.md#what-the-waf-lets-through-by-default) (and what it
+still blocks, such as raw-file uploads and WebDAV methods) with the settings and per-site files.
 
 ## How exclusions work
 
@@ -19,7 +19,9 @@ WordPress's method override, large forms) with their settings and files.
 ## Rule IDs for your own rules
 
 Use **10100 to 99999**. ID 10001 is the image's ACME exemption, and the Core Rule Set uses 900000 and up. Give
-every rule an ID that is unique across your files.
+every rule an ID that is unique across your files. Do not reuse the CRS setup IDs the image sets itself (900000,
+900110, 900200, 900220, 900250): libmodsecurity accepts the duplicate without a message. To change what they set, use
+the `MODSEC_*` setting or a `setvar` rule with an ID of your own.
 
 ## Example
 

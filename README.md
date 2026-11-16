@@ -6,9 +6,10 @@ you lose by weakening it.
 Two container images for the front door of a Docker host: a hardened nginx with a web application firewall, and the
 config generator that goes with it. They replace the images of the "separate containers" layout of
 [nginx-proxy](https://github.com/nginx-proxy/nginx-proxy): your backends keep their `VIRTUAL_HOST` variables, and
-nginx-proxy's own template writes the configuration. What is new is the firewall in front, and it refuses some
-legitimate requests out of the box (REST methods such as `PUT` and `DELETE`, some upload types, large forms): read
-the [first-use false positives](docs/configuration.md#first-use-false-positives) before you switch a busy site.
+nginx-proxy's own template writes the configuration. What is new is the firewall in front. Its defaults let common
+legitimate traffic through (REST methods, WordPress's method override, `Expect: 100-continue` uploads, forms up to
+1 MiB) and each of these is one setting to tighten; raw-file uploads and WebDAV methods are still refused until you
+allow them. See [what the WAF lets through](docs/configuration.md#what-the-waf-lets-through-by-default).
 
 | Image | What it is |
 |---|---|
@@ -51,14 +52,14 @@ Backends join the same network and set `VIRTUAL_HOST` (and `ACME_HOST` for a cer
 nginx-proxy. Look at the start-up output of `edge`: it shows any `SECURITY:` line.
 
 Before you use it for real, read the [configuration guide](docs/configuration.md). The points that most often
-matter: the [first-use false positives](docs/configuration.md#first-use-false-positives) (REST methods, upload types,
-WordPress's method override, large forms), the audit log (it holds request headers, treat it as sensitive), and how to
-add site-specific WAF exclusions.
+matter: [what the WAF lets through by default](docs/configuration.md#what-the-waf-lets-through-by-default) and what it
+still blocks, the audit log (it holds request headers, treat it as sensitive), and how to add site-specific WAF
+exclusions.
 
 ## Documentation
 
 - [docs/settings.md](docs/settings.md): every environment variable (generated from `edge/settings.tsv`).
-- [docs/configuration.md](docs/configuration.md): mount points, exclusions, first-use false positives, logs, block
+- [docs/configuration.md](docs/configuration.md): mount points, exclusions, what the WAF lets through, logs, block
   page, proxy-wide files, migrating, the `gen` image.
 - [docs/verify.md](docs/verify.md): check signatures and provenance, pin by digest.
 - [examples/](examples/): the compose file and how to write exclusions.
