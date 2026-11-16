@@ -136,6 +136,7 @@ jobs:
       - name: Unit tests and ignore-file check
         run: |
           python3 -m unittest discover -s tests -p 'test_*.py' -v
+          tests/release_test.sh
           python3 scripts/check_trivyignore.py .trivyignore.yaml
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
@@ -268,7 +269,8 @@ jobs:
   # Publishes the tested images, unchanged, when their content differs from :latest (build key), when the VERSION
   # line has no release yet, or on request, as the next version of that line (X.Y.Z, shared by both images). Only on
   # main, never for pull requests, and only after build-test passed (smoke tests, Trivy gate). Outputs: published
-  # (true only when the images are pushed, signed, attested and tagged), version and the two pushed digests.
+  # (true only when the images are pushed, signed, attested and tagged), version and the two pushed digests; the
+  # release manifest goes to the release job as the artifact release-manifest.
   publish:
     needs: [resolve, build-test]
     if: success() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
@@ -394,6 +396,31 @@ jobs:
           push-to-registry: true
           # Storage records (the organization's "Linked Artifacts" page) would need artifact-metadata: write.
           create-storage-record: false
+      # The release manifest (version, commit, build key, digests, upstream versions, packages, Go modules), attached
+      # to the GitHub Release by the release job, which holds contents: write (this job never does). Made before the
+      # tags move, so a failure here leaves no tagged version without its manifest; a re-run of this job replaces the
+      # artifact.
+      - name: Release manifest
+        if: steps.decide.outputs.publish == 'true'
+        env:
+          EDGE_DIGEST: ${{ steps.push.outputs.edge }}
+          GEN_DIGEST: ${{ steps.push.outputs.gen }}
+          VERSION: ${{ steps.version.outputs.version }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          mkdir "$RUNNER_TEMP/release"
+          python3 scripts/release_notes.py manifest --contents "$RUNNER_TEMP/tested/contents.json" \
+            --version "$VERSION" --commit "$COMMIT" --key "$KEY" \
+            --edge "$EDGE_REPOSITORY@$EDGE_DIGEST" --gen "$GEN_REPOSITORY@$GEN_DIGEST" \
+            --out "$RUNNER_TEMP/release/manifest.json"
+      - if: steps.decide.outputs.publish == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-manifest
+          path: ${{ runner.temp }}/release/manifest.json
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
       # Tags last: :latest and the line's MAJOR.MINOR tag move only to images that passed the same-bits check and are
       # signed and attested. The version tag X.Y.Z is new (publish_tested.sh refuses to move one).
       - name: Tag
@@ -413,6 +440,70 @@ jobs:
             echo "- \`$GEN_REPOSITORY@$GEN_DIGEST\`"
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
+  # The GitHub Release vX.Y.Z of what the publish job published (scripts/release.sh): a draft with the notes, the
+  # asset manifest.json, then publication, marked latest, which creates the git tag vX.Y.Z on the built commit. The
+  # only job with contents: write, and it gets no registry credentials. The notes compare the manifest with the
+  # previous release's and list the pull requests merged since (GitHub's generated notes). A failure leaves the run
+  # red (and opens the "Build failed" issue on a scheduled run); "Re-run failed jobs" finishes the Release: the script
+  # creates what is missing and refuses, without changing anything, what exists but differs.
+  release:
+    needs: [build-test, publish]
+    if: needs.publish.outputs.published == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # generate the notes, create the draft Release and its asset, publish it (creates the git tag)
+    env:
+      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ needs.publish.outputs.version }}
+      COMMIT: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-manifest
+          path: ${{ runner.temp }}/release
+      - name: Check the manifest describes what was published
+        env:
+          EDGE_DIGEST: ${{ needs.publish.outputs.edge_digest }}
+          GEN_DIGEST: ${{ needs.publish.outputs.gen_digest }}
+        run: |
+          if ! jq -e --arg v "$VERSION" --arg c "$COMMIT" --arg e "$EDGE_DIGEST" --arg g "$GEN_DIGEST" \
+            '.version == $v and .commit == $c and .images.edge.digest == $e and .images.gen.digest == $g' \
+            "$RUNNER_TEMP/release/manifest.json" >/dev/null; then
+            echo "release-manifest is not the manifest of $VERSION ($COMMIT, edge $EDGE_DIGEST, gen $GEN_DIGEST)" >&2
+            exit 1
+          fi
+      # The previous release (the highest published vX.Y.Z below this version), its manifest.json when it has one
+      # (none: the notes of a first release, with complete lists) and the pull requests merged since its tag.
+      - name: Previous release and pull requests
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/release.sh notes-inputs "$VERSION" "$COMMIT" "$RUNNER_TEMP/notes-inputs"
+      - name: Release notes
+        run: |
+          inputs="$RUNNER_TEMP/notes-inputs"
+          args=(--manifest "$RUNNER_TEMP/release/manifest.json" --prs "$inputs/prs.md" --out "$RUNNER_TEMP/notes.md")
+          if [ -f "$inputs/previous.json" ]; then
+            args+=(--previous "$inputs/previous.json")
+          fi
+          if [ "${VERSION##*.}" = 0 ]; then # X.Y.0: the Upgrading note of its CHANGELOG.md section, and a link to it
+            args+=(--changelog CHANGELOG.md)
+          fi
+          python3 scripts/release_notes.py notes "${args[@]}"
+          echo "::group::release notes"
+          cat "$RUNNER_TEMP/notes.md"
+          echo "::endgroup::"
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          scripts/release.sh "$VERSION" "$COMMIT" "$RUNNER_TEMP/release/manifest.json" "$RUNNER_TEMP/notes.md"
+          echo "released [v$VERSION]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/v$VERSION)" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+
   # A failed scheduled run opens a "Build failed" issue (unless the workflow already has one open); the next
   # successful scheduled run closes it. A cancelled job counts as failed: that is how a job that hit its
   # timeout-minutes ends, and a build that hangs every day must not go unnoticed. (A run superseded in the
@@ -420,7 +511,7 @@ jobs:
   # (github-actions[bot]) count, so an issue anyone can open with the same title does not mute the alarm. Only fixed
   # text and the run's URL go into the issue.
   report:
-    needs: [resolve, build-test, publish, keepalive]
+    needs: [resolve, build-test, publish, release, keepalive]
     if: always() && github.event_name == 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 5
