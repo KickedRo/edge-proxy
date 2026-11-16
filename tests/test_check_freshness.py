@@ -18,12 +18,23 @@ def image(created="2026-11-12T03:30:00.123456789Z", nginx="1.31.10", labels=None
     return config
 
 
-def check(images, max_age="8", versions=VERSIONS, now=NOW):
+def build_runs(conclusion="success", updated_at="2026-11-13T04:10:00Z", url="https://github.com/o/r/actions/runs/42"):
+    """`gh api 'repos/O/R/actions/workflows/build.yml/runs?branch=main&event=schedule&status=completed&per_page=1'`."""
+    return {"total_count": 1, "workflow_runs": [{"conclusion": conclusion, "updated_at": updated_at, "html_url": url}]}
+
+
+def check(images, max_age="8", versions=VERSIONS, now=NOW, last_build=None, max_build_age="2"):
+    if last_build is None:
+        last_build = build_runs()
     with tempfile.TemporaryDirectory() as d:
         resolved = os.path.join(d, "versions.env")
         with open(resolved, "w") as f:
             f.write(versions)
-        args = [sys.executable, SCRIPT, "--resolved", resolved, "--max-age-days", max_age, "--now", now]
+        build = os.path.join(d, "last-build.json")
+        with open(build, "w") as f:
+            f.write(last_build if isinstance(last_build, str) else json.dumps(last_build))
+        args = [sys.executable, SCRIPT, "--resolved", resolved, "--max-age-days", max_age, "--now", now,
+                "--last-build", build, "--max-build-age-days", max_build_age]
         for name, content in images.items():
             path = os.path.join(d, name + ".json")
             with open(path, "w") as f:
@@ -91,6 +102,48 @@ class CheckFreshness(unittest.TestCase):
         self.assertEqual(check({"edge": image()}, versions="CRS_VERSION=v4.30.0\n").returncode, 2)
         self.assertEqual(check({"edge": image()}, max_age="eight").returncode, 2)
         self.assertEqual(check({}).returncode, 2)
+
+    def test_last_build_recent_success_is_healthy(self):
+        # 2026-11-11T05:47:00Z is exactly 2 days before NOW: still healthy.
+        r = check({"edge": image()}, last_build=build_runs(updated_at="2026-11-11T05:47:00Z"))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("build", r.stdout)
+
+    def test_last_build_failed_is_unhealthy(self):
+        r = check({"edge": image()}, last_build=build_runs(conclusion="failure"))
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("failure", r.stdout)
+        self.assertIn("https://github.com/o/r/actions/runs/42", r.stdout)
+
+    def test_last_build_too_old_is_unhealthy(self):
+        r = check({"edge": image()}, last_build=build_runs(updated_at="2026-11-11T05:46:59Z"))
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("older than 2 days", r.stdout)
+        self.assertIn("https://github.com/o/r/actions/runs/42", r.stdout)
+
+    def test_no_scheduled_run_is_unhealthy(self):
+        r = check({"edge": image()}, last_build={"total_count": 0, "workflow_runs": []})
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("no completed scheduled build", r.stdout)
+
+    def test_image_age_backstop_30_days(self):
+        # An unchanged image is not republished, so weeks of age are fine; 30 days is the backstop.
+        r = check({"edge": image(created="2026-10-14T05:47:00Z")}, max_age="30")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        r = check({"edge": image(created="2026-10-14T05:46:59Z")}, max_age="30")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("older than 30 days", r.stdout)
+
+    def test_last_build_unusable_json_exits_2(self):
+        bad = ("not json", "[]", json.dumps({"workflow_runs": "x"}), json.dumps({"total_count": 1}),
+               json.dumps({"workflow_runs": [{"conclusion": "success", "html_url": "u"}]}),
+               json.dumps({"workflow_runs": [{"conclusion": "success", "updated_at": "yesterday", "html_url": "u"}]}))
+        for b in bad:
+            with self.subTest(bad=b[:30]):
+                r = check({"edge": image()}, last_build=b)
+                self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+                self.assertEqual(len(r.stderr.strip().splitlines()), 1)
+        self.assertEqual(check({"edge": image()}, max_build_age="two").returncode, 2)
 
 
 if __name__ == "__main__":

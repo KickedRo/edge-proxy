@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 """Freshness check of the published :latest images.
 
-Usage: check_freshness.py --resolved VERSIONS_FILE --max-age-days N [--now ISO-8601] NAME=IMAGE_JSON...
+Usage: check_freshness.py --resolved VERSIONS_FILE --max-age-days N --last-build RUNS_JSON --max-build-age-days M
+                          [--now ISO-8601] NAME=IMAGE_JSON...
 
 IMAGE_JSON is the image configuration of a published :latest, as printed by
 `docker buildx imagetools inspect REF --format '{{json .Image}}'`. VERSIONS_FILE is the output of
-scripts/resolve_versions.py, run now. An image is unhealthy when it was created more than N days before now, or
-when the NGINX_VERSION in its org.kickedro.versions label is lower than the resolved one (compared as numbers,
-part by part: 1.31.9 < 1.31.10). One line per image and problem on stdout.
-Exit 0 if every image is healthy, 1 if any is not, 2 on unusable input (unreadable file, no created date, no
-org.kickedro.versions label, a version that is not dotted numbers, a bad argument).
+scripts/resolve_versions.py, run now. RUNS_JSON is the output of
+`gh api 'repos/OWNER/REPO/actions/workflows/build.yml/runs?branch=main&event=schedule&status=completed&per_page=1'`.
+Unhealthy (one line each): no completed scheduled build run; the newest one did not conclude with success; it was
+last updated more than M days before now (the daily build must keep running: an unchanged image is not republished,
+so the image age alone says nothing); an image created more than N days before now (backstop); an image whose
+NGINX_VERSION in its org.kickedro.versions label is lower than the resolved one (compared as numbers, part by
+part: 1.31.9 < 1.31.10).
+Exit 0 if everything is healthy, 1 if anything is not, 2 on unusable input (unreadable file, no created date, no
+org.kickedro.versions label, a version that is not dotted numbers, a run list that is not as above, a bad argument).
 """
 import argparse
 import datetime
@@ -69,10 +74,31 @@ def read_image(path):
     return timestamp(config.get("created"), f"{path}: created"), pairs
 
 
+def read_last_build(path):
+    """The newest completed scheduled run: (conclusion, updated_at, url), or None when there is none."""
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, ValueError) as e:
+        raise InputError(f"{path}: {e}")
+    runs = data.get("workflow_runs") if isinstance(data, dict) else None
+    if not isinstance(runs, list):
+        raise InputError(f"{path}: no workflow_runs list")
+    if not runs:
+        return None
+    run = runs[0]
+    if not isinstance(run, dict) or not isinstance(run.get("conclusion"), str) \
+            or not isinstance(run.get("html_url"), str):
+        raise InputError(f"{path}: the run has no conclusion or html_url")
+    return run["conclusion"], timestamp(run.get("updated_at"), f"{path}: updated_at"), run["html_url"]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--resolved", required=True)
     ap.add_argument("--max-age-days", required=True)
+    ap.add_argument("--last-build", required=True)
+    ap.add_argument("--max-build-age-days", required=True)
     ap.add_argument("--now")
     ap.add_argument("images", nargs="*", metavar="NAME=IMAGE_JSON")
     args = ap.parse_args()
@@ -80,9 +106,13 @@ def main():
         if not re.fullmatch(r"\d+", args.max_age_days):
             raise InputError(f"--max-age-days: {args.max_age_days!r} is not a whole number of days")
         max_age = datetime.timedelta(days=int(args.max_age_days))
+        if not re.fullmatch(r"\d+", args.max_build_age_days):
+            raise InputError(f"--max-build-age-days: {args.max_build_age_days!r} is not a whole number of days")
+        max_build_age = datetime.timedelta(days=int(args.max_build_age_days))
         now = timestamp(args.now, "--now") if args.now else datetime.datetime.now(datetime.timezone.utc)
         if not args.images:
             raise InputError("no image given")
+        last_build = read_last_build(args.last_build)
         upstream_text = read_versions(args.resolved)["NGINX_VERSION"]
         upstream = version(upstream_text, f"{args.resolved}: NGINX_VERSION")
         checked = []
@@ -98,6 +128,21 @@ def main():
         return 2
 
     healthy = True
+    if last_build is None:
+        healthy = False
+        print("BUILD: no completed scheduled build run of build.yml on main")
+    else:
+        conclusion, updated, url = last_build
+        build_age = now - updated
+        if conclusion != "success":
+            healthy = False
+            print(f"BUILD: the last scheduled build concluded with {conclusion}: {url}")
+        elif build_age > max_build_age:
+            healthy = False
+            print(f"BUILD: the last successful scheduled build ran {updated.isoformat()}, older than "
+                  f"{args.max_build_age_days} days ({build_age} old): {url}")
+        else:
+            print(f"OK build: the last scheduled build succeeded {updated.isoformat()}: {url}")
     for name, created, nginx_text, nginx in checked:
         age = now - created
         if age > max_age:
