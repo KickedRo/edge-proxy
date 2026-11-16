@@ -2,7 +2,8 @@
 
 # edge: current nginx mainline + ModSecurity v3 (libmodsecurity + nginx connector) + OWASP CRS 4.
 # Build args (from scripts/resolve_versions.py): NGINX_VERSION MODSECURITY_VERSION
-# MODSECURITY_NGINX_VERSION CRS_VERSION NGINX_PROXY_REF.
+# MODSECURITY_NGINX_VERSION CRS_VERSION NGINX_PROXY_REF. Also needs --build-context repo=<repository root> (for
+# LICENSE and NOTICE): docker buildx build --build-context repo=. ... edge/
 ARG NGINX_VERSION=mainline
 
 # ---------------------------------------------------------------------------------------------------
@@ -99,6 +100,17 @@ RUN set -eux; \
     cp "$crs/LICENSE" /stage/etc/nginx/modsec/crs/LICENSE; \
     rm -f /stage/etc/nginx/modsec/crs/rules/*.example
 
+# -- licence texts of what the image contains, from the verified sources above (Apache-2.0 section 4(a) and the
+# BSD and MIT notices require recipients to get a copy). nginx-proxy's is fetched from the same pinned commit as
+# network_internal.conf below.
+RUN set -eux; \
+    for d in modsecurity modsecurity-nginx crs nginx; do mkdir -p "/stage/usr/share/licenses/$d"; done; \
+    cp "modsecurity-${MODSECURITY_VERSION}/LICENSE" /stage/usr/share/licenses/modsecurity/LICENSE; \
+    cp "ModSecurity-nginx-${MODSECURITY_NGINX_VERSION}/LICENSE" /stage/usr/share/licenses/modsecurity-nginx/LICENSE; \
+    cp "coreruleset-${CRS_VERSION#v}/LICENSE" /stage/usr/share/licenses/crs/LICENSE; \
+    cp "nginx-${NGINX_VERSION}/LICENSE" /stage/usr/share/licenses/nginx/LICENSE; \
+    for f in /stage/usr/share/licenses/*/LICENSE; do test -s "$f"; done
+
 # ---------------------------------------------------------------------------------------------------
 FROM nginx:${NGINX_VERSION}
 
@@ -118,6 +130,10 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /stage/ /
+# This repository's own LICENSE and NOTICE (named build context "repo" = the repository root: build with
+# --build-context repo=. as the CI workflow does) and nginx-proxy's licence at the pinned commit.
+COPY --chmod=644 --from=repo LICENSE NOTICE /usr/share/licenses/edge-proxy/
+ADD --chmod=644 https://raw.githubusercontent.com/nginx-proxy/nginx-proxy/${NGINX_PROXY_REF}/LICENSE /usr/share/licenses/nginx-proxy/LICENSE
 RUN ldconfig
 
 # Same nginx.conf changes as nginx-proxy's Dockerfile.debian at NGINX_PROXY_REF (toplevel.conf.d include,

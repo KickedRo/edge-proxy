@@ -69,7 +69,11 @@ empty by default.
 
 Findings that only exist as GitHub advisories (GHSA) can turn the gate red for a Go module although `govulncheck` finds
 nothing to upgrade (it reads the Go vulnerability database). Then either the module has a fixed version that docker-gen
-does not use yet, or you add a time-limited exception while you wait for the fix.
+does not use yet, or there is none. Then, in this order of preference: wait (the Go vulnerability database often
+catches up within days, and the next run passes); or, if the advisory does not apply to how docker-gen uses the
+module, add an exception in `.trivyignore.yaml` with the advisory ID, a statement that says why, and an expiry at
+most 30 days ahead; or pin the fixed module version by hand in the docker-gen step of `gen/Dockerfile` (`go get
+<module>@<fixed version>`), and remove the pin when the automatic upgrade covers it.
 
 ## Dependabot
 

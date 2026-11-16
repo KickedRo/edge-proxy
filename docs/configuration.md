@@ -22,7 +22,7 @@ Contents: [Mount points](#mount-points-for-your-own-rules-and-config) ·
 | `/etc/nginx/modsec/custom.d/` | Your ModSecurity files (`*.conf`), loaded **before** the Core Rule Set. For exclusions that must be in place before a rule runs, and for your own rules. |
 | `/etc/nginx/modsec/after.d/` | Your ModSecurity files (`*.conf`), loaded **after** the Core Rule Set. For things that must come after the rules exist, such as `SecRuleRemoveById` or response exclusions. |
 | `/etc/nginx/kickedro/block-page.html` | Your own [block page](#block-page). |
-| `/etc/nginx/templates/` | Your nginx templates, rendered at start by the official nginx image mechanism (`*.template`, `NGINX_ENVSUBST_*`), unchanged. In the split layout `/etc/nginx/conf.d` belongs to `gen` and is read-only on `edge`, so there is nowhere for these to be written unless you set `NGINX_ENVSUBST_OUTPUT_DIR`. Per-site nginx settings normally go in nginx-proxy's `vhost.d` files instead. |
+| `/etc/nginx/templates/` | The official nginx image's template mechanism (`*.template` files, rendered at start) is still in the image, but **in the split layout it does nothing useful**: `nginx.conf` includes only `conf.d/*.conf` at http level and `toplevel.conf.d/*.conf` at main level, and `conf.d` belongs to `gen` and is read-only on `edge`. For your own nginx settings use nginx-proxy's `vhost.d` snippets, or a file in the `conf.d` volume that `gen` mounts writable. |
 
 Both ModSecurity directories may be empty or not mounted at all. The image's own settings are rendered at start from
 its own templates (kept apart from `/etc/nginx/templates`) and loaded in this order: ModSecurity's fixed settings, the
@@ -106,7 +106,9 @@ ModSecurity's audit log records blocked requests and other relevant transactions
   in the container's `logging.options`, or use another driver. Without it, logs grow until the disk is full.
 - **Reliable parsing.** Large audit entries written to stdout can be interleaved with access-log lines when the load
   is high. If you feed the log to a parser, write it to a file on a mounted, rotated volume instead
-  (`MODSEC_AUDIT_LOG=/var/log/modsec/audit.json`), and rotate that file yourself. Mount the directory writable.
+  (`MODSEC_AUDIT_LOG=/var/log/modsec/audit.json`), and rotate that file yourself. Mount the directory writable. **Rotating:** use logrotate's `copytruncate` (checked: the
+  file then starts clean), or rename the file and **restart** the container. A plain rename followed by an nginx reload
+  does not work: ModSecurity keeps writing to the renamed file.
 - **Finding an entry.** The reference on the [block page](#block-page) is the `unique_id` of the audit entry, and the
   `$request_id` of nginx.
 
@@ -150,8 +152,9 @@ Replace the images and keep your `VIRTUAL_HOST` backends. Two things differ.
    already sets them. Remove those lines and use the `EDGE_*` variables from the [settings table](settings.md)
    (`EDGE_SERVER_TOKENS`, `EDGE_CLIENT_HEADER_TIMEOUT`, and so on). `msie_padding` is set by the image only while `EDGE_BLOCK_PAGE` is `on`; with `off` the image does not set
    it. This may be relaxed in a later version.
-2. **Stricter defaults.** Timeouts are 10 s, keep-alive is 15 s (the stock `nginx.conf` has 65 s), request
-   bodies over 128 MiB are refused, and the WAF blocks attacks. Look for `SECURITY:` lines and 403s in the logs
+2. **Stricter defaults.** Timeouts are 10 s, keep-alive is 15 s (the stock `nginx.conf` has 65 s),
+   request bodies over 128 MiB are refused (nginx's own `client_max_body_size`, 1m unless you raise it for a vhost
+   in nginx-proxy's usual way, refuses larger bodies first: ModSecurity's limit only applies below it), and the WAF blocks attacks. Look for `SECURITY:` lines and 403s in the logs
    after the move; start with `MODSEC_RULE_ENGINE=DetectionOnly` on a busy site if you want to see the false
    positives before blocking.
 
@@ -202,7 +205,7 @@ variable holds it; it is printed at start). Use it like nginx-proxy's `dockergen
 - **acme-companion** works as with nginx-proxy's separate-containers layout: it finds `edge` by the label
   `com.github.nginx-proxy.nginx` and `gen` by `com.github.nginx-proxy.docker-gen` (or the `NGINX_PROXY_CONTAINER` and
   `NGINX_DOCKER_GEN_CONTAINER` variables), writes certificates to the shared `certs` volume and challenge files to the
-  shared `html` volume, and signals `gen`. The `gen` image sets the `DOCKER_GEN_VERSION` variable acme-companion looks
+  shared `html` volume, and signals both `gen` and the `edge` container (SIGHUP). The `gen` image sets the `DOCKER_GEN_VERSION` variable acme-companion looks
   for. This combination is **not exercised by the smoke tests**; [`examples/docker-compose.yml`](../examples/docker-compose.yml)
   follows acme-companion's documentation for the layout. Its HTTP-01 requests fit the
   [ACME exemption](#the-acme-challenge-exemption).

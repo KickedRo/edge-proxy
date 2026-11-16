@@ -1,12 +1,12 @@
 # edge-proxy
 
+**Start here: the [settings table](docs/settings.md)**, every setting of the `edge` image with its default and what
+you lose by weakening it.
+
 Two container images for the front door of a Docker host: a hardened nginx with a web application firewall, and the
 config generator that goes with it. They are a drop-in for the "separate containers" layout of
 [nginx-proxy](https://github.com/nginx-proxy/nginx-proxy): your backends keep their `VIRTUAL_HOST` variables and
 nothing else changes.
-
-**Start here: the [settings table](docs/settings.md)**, every setting of the `edge` image with its default and what
-you lose by weakening it.
 
 | Image | What it is |
 |---|---|
@@ -16,7 +16,7 @@ you lose by weakening it.
 ## Why not the upstream nginx-proxy image
 
 - **Freshness.** Both images are rebuilt every day against the newest nginx, ModSecurity, CRS and docker-gen, with
-  the Debian security updates. A changed build is tested, scanned and published; an unchanged one is not. A
+  the Debian security updates. A changed build is tested, scanned and published; an unchanged one is only published on Mondays. A
   published `latest` is never older than about a week, and an alarm opens an issue if it is.
 - **A WAF in front of every site.** Requests are inspected by the OWASP Core Rule Set (paranoia level 1, blocking
   from the first request). Upstream nginx-proxy has no WAF.
@@ -39,7 +39,7 @@ Copy it, change the example host names and the e-mail address, then:
 docker compose up -d
 ```
 
-Backends join the same network and set `VIRTUAL_HOST` (and `LETSENCRYPT_HOST` for a certificate) as they would with
+Backends join the same network and set `VIRTUAL_HOST` (and `ACME_HOST` for a certificate; `LETSENCRYPT_HOST` is its older name, which acme-companion still accepts) as they would with
 nginx-proxy. Look at the start-up output of `edge`: it shows any `SECURITY:` line.
 
 Before you use it for real, read the [configuration guide](docs/configuration.md). The points that most often

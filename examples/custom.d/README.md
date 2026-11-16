@@ -33,6 +33,7 @@ SecRule REQUEST_HEADERS:Host "@streq app.example.com" \
     ctl:ruleRemoveTargetByTag=attack-xss;ARGS:comment"
 ```
 
-To exclude a single rule from a single path instead, use `ctl:ruleRemoveById=<id>` with a
-`REQUEST_URI "@beginsWith /path"` condition. Remember that one request often matches several rules: the tag form
+To exclude a single rule from a single path instead, use `ctl:ruleRemoveById=<id>` with an exact path match
+(`REQUEST_FILENAME "@streq /upload"`) or a prefix that ends in `/` (`"@beginsWith /api/"`). A bare prefix such as
+`/api` also matches `/api-admin`. Remember that one request often matches several rules: the tag form
 above removes a whole class at once.

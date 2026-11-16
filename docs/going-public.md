@@ -36,7 +36,7 @@ A record of how this repository is protected, and what is still to do. It is not
 
 **Packages**
 - Both container packages (`edge-proxy` and `edge-proxy-gen`) on ghcr.io are public, so images can be pulled and
-  [verified](verify.md) without logging in.
+  their signatures checked with `cosign` [without logging in](verify.md) (`gh attestation verify` needs a GitHub login).
 
 ## Still to do
 

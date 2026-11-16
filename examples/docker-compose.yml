@@ -105,7 +105,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     depends_on: [nginx-proxy, nginx-proxy-gen]
 
-  # A test backend. Remove it and start your own containers with VIRTUAL_HOST (and LETSENCRYPT_HOST, for a
+  # A test backend. Remove it and start your own containers with VIRTUAL_HOST (and ACME_HOST, for a
   # certificate) on the proxy network. Replace app.example.com with a name that points at this host.
   whoami:
     image: jwilder/whoami
@@ -113,4 +113,4 @@ services:
     networks: [proxy]
     environment:
       VIRTUAL_HOST: app.example.com
-      LETSENCRYPT_HOST: app.example.com
+      ACME_HOST: app.example.com # LETSENCRYPT_HOST is the older name, still accepted

@@ -4,8 +4,9 @@ Copyright (c) 2026 KickedRo, MIT License (see LICENSE).
 The images built from this repository contain, and the build downloads, the following third-party software. Each
 remains under its own licence and copyright. The copyright lines below are quoted from the projects' own files at
 the versions that were current when this file was last updated; the images' build always uses the newest release,
-and the licence file of each project is included in or fetched with its source. None of the Apache-licensed
-projects ships a separate NOTICE file.
+and the licence text of each project is shipped in the images under /usr/share/licenses/<project>/ (edge: modsecurity,
+modsecurity-nginx, crs, nginx, nginx-proxy; gen: docker-gen, nginx-proxy; both: edge-proxy, holding this LICENSE and
+NOTICE). None of the Apache-licensed projects ships a separate NOTICE file.
 
 nginx (BSD-2-Clause)
   Source: LICENSE of nginx 1.31.8, https://nginx.org/LICENSE
