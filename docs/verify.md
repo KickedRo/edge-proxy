@@ -6,9 +6,12 @@ Every published image is built by the GitHub Actions workflow of this repository
 - a **build provenance attestation** (GitHub's signed record of which repository, workflow and commit built it);
 - an **SBOM** (the list of packages inside) and buildx provenance, stored in the registry next to the image.
 
-Check them before you trust a tag. Images are `ghcr.io/kickedro/edge-proxy` and `ghcr.io/kickedro/edge-proxy-gen`.
-Tags are `latest` and a release tag: `<nginx>-modsec<modsecurity>-crs<crs>-<YYYYMMDD>` for `edge`,
-`<docker-gen>-np<first 12 characters of the nginx-proxy commit>-<YYYYMMDD>` for `gen`. A tag can move; a digest cannot, so verify and pin the digest.
+Check them before you trust a tag. Images are `ghcr.io/kickedro/edge-proxy` and `ghcr.io/kickedro/edge-proxy-gen`,
+for `linux/amd64` only. Tags are `latest` and a release tag per publish: `<nginx>-modsec<modsecurity>-crs<crs>-<YYYYMMDD>`
+for `edge`, `<docker-gen>-np<first 12 characters of the nginx-proxy commit>-<YYYYMMDD>` for `gen` (UTC date). A second
+publish on the same day gets `.2` after the date, a third `.3`, and so on (`1.31.8-modsec3.0.17-crs4.30.0-20261116.2`).
+A release tag is never moved to another image once published; `latest` moves with every publish. Still, what the
+signature covers is the digest, so verify and pin the digest.
 
 You need Docker with buildx, [`jq`](https://jqlang.github.io/jq/), [`cosign`](https://docs.sigstore.dev/cosign/) 3.x (tested
 with 3.1.4), and the [GitHub CLI](https://cli.github.com/) (`gh`) 2.49 or newer: older distro packages (for example
@@ -60,7 +63,8 @@ docker buildx imagetools inspect ghcr.io/kickedro/edge-proxy@$EDGE --format '{{j
 - `org.kickedro.build-key`: one hash over what is inside **both** images (versions, source files, base images, package
   lists, compiled binaries), so it is identical on `edge` and `gen`. The same key means the same content; it is how an
   unchanged daily build is told from a changed one.
-- `org.opencontainers.image.{source,revision,version,licenses}`: repository, commit, release tag and licences.
+- `org.opencontainers.image.{source,revision,version,licenses}`: repository, commit, release tag (with its `.2`
+  suffix, if any) and licences.
 - `maintainer`: on `edge`, inherited from the official nginx base image; expected.
 
 ```sh
@@ -79,7 +83,8 @@ services:
     image: ghcr.io/kickedro/edge-proxy@sha256:<the digest you verified>
 ```
 
-Keep the release tag in a comment (`# 1.31.8-modsec3.0.17-crs4.30.0-20261113`) so you know what you are on. To update,
+Keep the release tag in a comment (`# 1.31.8-modsec3.0.17-crs4.30.0-20261113`) so you know what you are on; it names
+that one image. To update,
 look up the new digest, repeat steps 2 and 3, and change the line. Images are rebuilt about daily, and published
 when their content changes and at least weekly, so plan on updating regularly: that is how you get new security fixes.
 
