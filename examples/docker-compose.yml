@@ -1,0 +1,116 @@
+# nginx-proxy's "separate containers" layout with the edge and gen images, plus acme-companion for Let's Encrypt
+# certificates. The edge/gen part follows tests/compose.smoke.yml, which the CI smoke tests run; the acme-companion
+# part follows its own documentation and is not exercised by those tests.
+#
+# Change before use: the host names (example.com is a placeholder), the e-mail address, and the Docker socket path
+# if you do not run rootful Docker. Then: docker compose up -d
+#
+# The images below are referenced by :latest to keep the example short. For a real deployment, verify an image (see
+# docs/verify.md) and pin it by digest: image: ghcr.io/kickedro/edge-proxy@sha256:<digest>
+
+volumes:
+  nginx_conf:
+  nginx_vhost:
+  nginx_certs:
+  nginx_htpasswd:
+  nginx_errors:
+  nginx_dhparam:
+  nginx_html: # the ACME challenge files: written by acme-companion, served by edge
+  acme_state:
+
+networks:
+  proxy:
+
+services:
+  nginx-proxy:
+    image: ghcr.io/kickedro/edge-proxy:latest
+    container_name: nginx-proxy
+    networks: [proxy]
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      # Every setting has a secure default, see docs/settings.md. Uncomment to change, then check the log for
+      # SECURITY: lines. DetectionOnly logs attacks without blocking them: useful for a first period on a new site.
+      # MODSEC_RULE_ENGINE: "DetectionOnly"
+      MODSEC_AUDIT_LOG: "/dev/stdout"
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETUID, SETGID, DAC_OVERRIDE]
+    security_opt: ["no-new-privileges:true"]
+    # The audit log goes to the container log, and Docker's json-file driver only rotates with max-size.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    volumes:
+      # Everything is read-only here: edge reads what gen, acme-companion and you provide, and has no Docker socket.
+      - nginx_conf:/etc/nginx/conf.d:ro
+      - nginx_vhost:/etc/nginx/vhost.d:ro
+      - nginx_htpasswd:/etc/nginx/htpasswd:ro
+      - nginx_certs:/etc/nginx/certs:ro
+      - nginx_dhparam:/etc/nginx/dhparam:ro
+      - nginx_errors:/usr/share/nginx/html/errors:ro
+      - nginx_html:/usr/share/nginx/html:ro
+      # Your own WAF rules (see docs/configuration.md and examples/custom.d/README.md); both directories may be absent.
+      # - ./custom.d:/etc/nginx/modsec/custom.d:ro
+      # - ./after.d:/etc/nginx/modsec/after.d:ro
+    labels:
+      # gen finds this container by the label named in its NGINX_CONTAINER_LABEL; acme-companion by this exact name.
+      - com.github.nginx-proxy.nginx=true
+
+  nginx-proxy-gen:
+    image: ghcr.io/kickedro/edge-proxy-gen:latest
+    container_name: nginx-proxy-gen
+    # No network at all: it only reads the Docker socket and writes files.
+    network_mode: none
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      NGINX_CONTAINER_LABEL: "com.github.nginx-proxy.nginx"
+      # With network_mode none, gen's own resolv.conf holds the host's resolvers, not Docker's. Name the resolver
+      # that nginx (on the proxy network) should use.
+      RESOLVERS: "127.0.0.11"
+      # Copy a pre-generated RFC 7919 group to the dhparam volume (shared with edge).
+      DHPARAM_SKIP: "false"
+      # No trusted proxy in front of this one. Set "true" if there is one (a load balancer, a CDN).
+      TRUST_DOWNSTREAM_PROXY: "false"
+    # No command: the image's default command runs.
+    volumes:
+      # Rootful Docker's socket path; rootless Docker and Docker Desktop use another one.
+      - /var/run/docker.sock:/tmp/docker.sock:ro
+      - nginx_conf:/etc/nginx/conf.d # written by docker-gen
+      - nginx_vhost:/etc/nginx/vhost.d:ro
+      - nginx_htpasswd:/etc/nginx/htpasswd:ro
+      - nginx_certs:/etc/nginx/certs:ro
+      - nginx_dhparam:/etc/nginx/dhparam # written by the entrypoint
+      - nginx_errors:/usr/share/nginx/html/errors:ro
+    labels:
+      # How acme-companion finds this container (to ask it for a reload after a certificate change).
+      - com.github.nginx-proxy.docker-gen=true
+
+  acme-companion:
+    # Pinned by version and digest: release v2.8.2, the multi-platform image index of the tag 2.8.2. To update, pick
+    # the new release on https://github.com/nginx-proxy/acme-companion/releases, look up the digest of its tag
+    # (docker buildx imagetools inspect nginxproxy/acme-companion:<version>), and change both.
+    image: nginxproxy/acme-companion:2.8.2@sha256:e3c5fb08bf623ae93dbc945d78fe50040c1fa107ddf59f7ee04ba6a61f34cbc1
+    container_name: nginx-proxy-acme
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      DEFAULT_EMAIL: "admin@example.com"
+    volumes:
+      - nginx_certs:/etc/nginx/certs:rw
+      - nginx_html:/usr/share/nginx/html:rw
+      - acme_state:/etc/acme.sh
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on: [nginx-proxy, nginx-proxy-gen]
+
+  # A test backend. Remove it and start your own containers with VIRTUAL_HOST (and ACME_HOST, for a
+  # certificate) on the proxy network. Replace app.example.com with a name that points at this host.
+  whoami:
+    image: jwilder/whoami
+    container_name: whoami
+    networks: [proxy]
+    environment:
+      VIRTUAL_HOST: app.example.com
+      ACME_HOST: app.example.com # LETSENCRYPT_HOST is the older name, still accepted

@@ -104,6 +104,14 @@ PINNED_REF=$(sed -n 's/^NGINX_PROXY_REF=//p' "$HERE/../pins.env")
 ENVS=$(docker inspect "$GEN" --format '{{range .Config.Env}}{{println .}}{{end}}') || fail nginx_proxy_ref "cannot inspect $GEN"
 expect_eq nginx_proxy_ref "$(sed -n 's/^NGINX_PROXY_VERSION=//p' <<<"$ENVS")" "$PINNED_REF"
 
+# The licence texts of what the gen image contains are shipped.
+LIC=$(docker run --rm --entrypoint sh "$GEN" -c '
+  for f in docker-gen/LICENSE nginx-proxy/LICENSE edge-proxy/LICENSE edge-proxy/NOTICE; do
+    [ -s "/usr/share/licenses/$f" ] || { echo "missing or empty: $f"; exit 1; }
+  done
+  echo ok' 2>&1) || fail licenses_shipped "$LIC"
+expect_eq licenses_shipped "$LIC" ok
+
 # ---- 1. bring the layout up ---------------------------------------------------------------------------------
 # Create (not start) first, so the volumes exist and the certificates can be put in before anything runs.
 OUT=$(compose up --no-start 2>&1) || fail compose_create "$OUT"

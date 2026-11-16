@@ -158,6 +158,7 @@ jobs:
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: edge
+          build-contexts: repo=. # LICENSE and NOTICE, shipped in the image
           load: true
           tags: edge-proxy:ci
           build-args: ${{ steps.args.outputs.edge }}
@@ -169,6 +170,7 @@ jobs:
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: gen
+          build-contexts: repo=. # LICENSE and NOTICE, shipped in the image
           load: true
           tags: edge-proxy-gen:ci
           build-args: ${{ steps.args.outputs.gen }}

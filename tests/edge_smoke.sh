@@ -146,6 +146,15 @@ for tool in gcc cc g++ c++ make cpp ld as; do
 done
 pass no_compilers
 
+# The licence texts of what the image contains are shipped (Apache-2.0 section 4(a), BSD and MIT notices).
+docker run --rm --entrypoint sh "$IMAGE" -c '
+  for f in modsecurity/LICENSE modsecurity-nginx/LICENSE crs/LICENSE nginx/LICENSE nginx-proxy/LICENSE edge-proxy/LICENSE edge-proxy/NOTICE; do
+    [ -s "/usr/share/licenses/$f" ] || { echo "missing or empty: $f"; exit 1; }
+  done
+  grep -q "Apache License" /usr/share/licenses/modsecurity/LICENSE && grep -q "Apache License" /usr/share/licenses/modsecurity-nginx/LICENSE' \
+  >/dev/null 2>"$WORK/licenses.err" || fail licenses_shipped "$(cat "$WORK/licenses.err" 2>/dev/null)"
+pass licenses_shipped
+
 # The deny status is applied with SecRuleUpdateActionById on these CRS rules; an update on an unknown ID
 # passes nginx -t silently, so make a CRS renumbering fail here (and so the build).
 for id in 949110 949111 959100 959101; do

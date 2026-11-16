@@ -1,0 +1,12 @@
+# Dependabot version updates for the GitHub Actions the workflows use (full-SHA pins with a version comment).
+# Nothing else is listed on purpose: the versions of nginx, ModSecurity, CRS, docker-gen and Go come from
+# scripts/resolve_versions.py, which the daily build runs.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    # A new action release waits a week before a pull request is opened for it (supply-chain hygiene).
+    cooldown:
+      default-days: 7

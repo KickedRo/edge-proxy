@@ -3,6 +3,7 @@
 # gen: docker-gen (built here from its tagged source) plus nginx-proxy's template and entrypoint, a drop-in for
 # nginx-proxy's separate-containers layout.
 # Build args come from build/versions.env: GO_VERSION, DOCKER_GEN_VERSION, NGINX_PROXY_REF; SECURITY_EPOCH is the date.
+# Also needs --build-context repo=<repository root> (for LICENSE and NOTICE): docker buildx build --build-context repo=. ... gen/
 ARG GO_VERSION
 
 # ---- build stage: nginx-proxy at the pinned commit, docker-gen from its tag --------------------------------------
@@ -89,6 +90,11 @@ RUN mkdir -p /etc/nginx/conf.d /etc/nginx/vhost.d /etc/nginx/htpasswd /etc/nginx
 COPY --from=build /docker-gen /usr/local/bin/docker-gen
 COPY --from=build /src/LICENSE /usr/local/share/doc/docker-gen/
 COPY --from=build /nginx-proxy/app /nginx-proxy/nginx.tmpl /nginx-proxy/LICENSE /app/
+# Licence texts of what the image contains (docker-gen, nginx-proxy) plus this repository's own LICENSE and NOTICE
+# (named build context "repo" = the repository root: build with --build-context repo=. as the CI workflow does).
+COPY --from=build /src/LICENSE /usr/share/licenses/docker-gen/LICENSE
+COPY --from=build /nginx-proxy/LICENSE /usr/share/licenses/nginx-proxy/LICENSE
+COPY --chmod=644 --from=repo LICENSE NOTICE /usr/share/licenses/edge-proxy/
 WORKDIR /app/
 
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
