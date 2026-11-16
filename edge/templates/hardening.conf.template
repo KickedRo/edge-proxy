@@ -6,7 +6,9 @@
 # All of these are inherited by every server and location of nginx-proxy's generated configuration. Of these
 # directives the template itself sets only add_header (HSTS, see below) and server_tokens (its fallback server, and a
 # vhost whose container has SERVER_TOKENS). A vhost snippet that sets a directive of the same kind replaces the
-# inherited value for its vhost (for *_hide_header and sub_filter: all the inherited ones).
+# inherited value for its vhost (for *_hide_header and sub_filter: all the inherited ones). A proxy-wide conf.d file
+# that sets server_tokens, a timeout, large_client_header_buffers or add_header_inherit at http level replaces the
+# image's line: docker-entrypoint.d/90-kickedro-config-check.sh comments it out at start and says so in the log.
 
 # Hide the nginx version in the Server header and on error pages (EDGE_SERVER_TOKENS).
 server_tokens ${EDGE_SERVER_TOKENS};

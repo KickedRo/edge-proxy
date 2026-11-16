@@ -165,18 +165,19 @@ COPY modsecurity/ /etc/nginx/modsec/
 # The image's own templates live outside /etc/nginx/templates, which stays free for users' templates
 # (official NGINX_ENVSUBST_* mechanism, untouched). 18-kickedro-render.sh renders these ones.
 COPY templates/ /etc/nginx/modsec/templates/
-# The settings (defaults, allowed values, SECURITY: texts; read at start by 05-kickedro-settings.envsh and
-# 18-kickedro-render.sh) and the built-in block page (19-kickedro-block-page.sh). Not under /etc/nginx/kickedro,
-# where a custom block page is mounted.
-COPY --chmod=644 settings.tsv block-page.html /usr/local/share/kickedro/
+# The settings (defaults, allowed values, SECURITY: texts; read at start by 05-kickedro-settings.envsh,
+# 18-kickedro-render.sh and 90-kickedro-config-check.sh), their value rules (settings-lib.sh, sourced by 05 and 90) and
+# the built-in block page (19-kickedro-block-page.sh). Not under /etc/nginx/kickedro, where a custom block page is
+# mounted.
+COPY --chmod=644 settings.tsv settings-lib.sh block-page.html /usr/local/share/kickedro/
 COPY --chmod=755 docker-entrypoint.d/ /docker-entrypoint.d/
 
-# Working directories: ModSecurity temp/data, rendered settings, and the two mount points for site rules.
-# A read-only root filesystem needs a tmpfs at /etc/nginx/modsec/rendered (written at start), at the
+# Working directories: ModSecurity temp/data, rendered settings, and the three mount points for site rules and CRS
+# plugins. A read-only root filesystem needs a tmpfs at /etc/nginx/modsec/rendered (written at start), at the
 # stock nginx paths /var/cache/nginx and /run, and at /var/cache/modsecurity.
 RUN set -eux; \
-    mkdir -p /var/cache/modsecurity/tmp /var/cache/modsecurity/data \
-        /etc/nginx/modsec/rendered /etc/nginx/modsec/custom.d /etc/nginx/modsec/after.d; \
+    mkdir -p /var/cache/modsecurity/tmp /var/cache/modsecurity/data /etc/nginx/modsec/rendered \
+        /etc/nginx/modsec/custom.d /etc/nginx/modsec/after.d /etc/nginx/modsec/plugins; \
     chown -R nginx:nginx /var/cache/modsecurity
 
 # No ENV defaults for the settings: edge/settings.tsv is their single source. 05-kickedro-settings.envsh applies the

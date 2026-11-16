@@ -4,8 +4,8 @@
 # default command) the way nginx-proxy's docker-compose-separate-containers.yml does, in front of a tiny echo backend
 # and a plain nginx backend that sends headers of its own.
 # Prints "PASS <name>" per assertion, stops at the first failure. The compose project, its volumes, containers
-# and every temp file are removed on exit (also on failure). Host ports: 127.0.0.1 only, taken from $PORT_1 and
-# $PORT_2 when set (devbox), else picked by Docker.
+# and every temp file are removed on exit (also on failure). Host ports: 127.0.0.1 only, taken from PORT_1 and
+# PORT_2 when they are set, else picked by Docker.
 set -euo pipefail
 
 EDGE=${1:?usage: tests/split_smoke.sh EDGE_IMAGE GEN_IMAGE}
@@ -20,12 +20,14 @@ command -v jq >/dev/null || { echo "FAIL setup: jq is required on the host" >&2;
 command -v curl >/dev/null || { echo "FAIL setup: curl is required on the host" >&2; exit 1; }
 
 RUN="splittest-$$-$RANDOM"
+WORK=$(mktemp -d)
 export RUN BACKEND_IMAGE HEADERS_BACKEND_IMAGE EDGE_IMAGE=$EDGE GEN_IMAGE=$GEN HTTP_PORT=${PORT_1:-} HTTPS_PORT=${PORT_2:-}
 compose() { docker compose -p "$RUN" --profile '*' -f "$HERE/compose.smoke.yml" "$@"; }
 cleanup() {
   compose down -v --remove-orphans --timeout 5 >/dev/null 2>&1 || true
   # Anything compose could not remove (a failed 'up' before the project existed).
   docker rm -f -v "$RUN-edge" "$RUN-gen" "$RUN-whoami" "$RUN-broken" "$RUN-headers" >/dev/null 2>&1 || true
+  rm -rf "$WORK"
 }
 trap cleanup EXIT
 
@@ -122,6 +124,10 @@ OUT=$(volume_run nginx_certs --entrypoint sh "$GEN" -c '
       -keyout "$h.key" -out "$h.crt" 2>/dev/null
     chmod 600 "$h.key"
   done' 2>&1) || fail setup "could not create the self-signed certificates: $OUT"
+# nginx-proxy's documented proxy-wide file (its README, "Proxy-wide"), in the conf.d volume next to gen's default.conf.
+OUT=$(volume_run nginx_conf --entrypoint sh "$GEN" -c \
+  "{ echo 'server_tokens off;'; echo 'client_max_body_size 100m;'; } > /v/my_proxy.conf" 2>&1) \
+  || fail setup "could not write my_proxy.conf: $OUT"
 OUT=$(compose up -d whoami headers nginx-proxy nginx-proxy-gen 2>&1) || fail compose_up "$OUT"
 
 HTTP_HOST_PORT=$(compose port nginx-proxy 80 | sed 's/.*://') || fail setup "could not read the published HTTP port"
@@ -141,6 +147,13 @@ curl -s -k --max-time 10 --resolve "app.example.com:$HTTPS_HOST_PORT:127.0.0.1" 
   | grep -q '^Hostname:' && pass backend_reached || fail backend_reached "response is not whoami's"
 
 expect_waf_block waf_on_after_gen xss_gen
+
+# The proxy-wide file works as with nginx-proxy: the edge gave way on server_tokens (NOTICE in its log), and the file's
+# client_max_body_size applies to the generated vhosts (a 2 MB upload passes; nginx's default 1m would refuse it).
+grep -q '^NOTICE: /etc/nginx/conf.d/my_proxy.conf:1 sets "server_tokens off"' <<<"$(docker logs "$RUN-edge" 2>&1)" \
+  || fail proxy_wide_file "no NOTICE line for my_proxy.conf in the edge's log"
+head -c 2000000 /dev/zero | tr '\0' a > "$WORK/upload.txt"
+expect_eq proxy_wide_file "$(https_status / -H 'Expect:' -F "file=@$WORK/upload.txt;type=application/octet-stream")" 200
 
 # The edge's hardening reaches the generated vhosts. headers.example.com's backend sends version headers of its own;
 # its generated HTTPS server block adds HSTS (an add_header of its own, which by default drops the http-level ones).

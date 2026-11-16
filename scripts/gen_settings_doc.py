@@ -25,8 +25,11 @@ saying what protection is lost and linking here.
 Value forms: `<integer>` a whole number from 1, at most 15 digits; `<time>` a whole number from 1, at most 9
 digits, with the unit `ms`, `s`, `m` or `h` (`10s`); `<buffers>` a count (1 to 4 digits) and a size of at least `1k`
 separated by a space (`4 8k`; the size in bytes or with `k` or `m`, at most 7 digits); `<path>` an absolute file path
-(letters, digits and `. _ / -`). "Weaker" lists the values that print the `SECURITY:` line: "above" compares numbers
-by value, times by duration, and buffers by count or size.
+(letters, digits and `. _ / -`); `<methods>` HTTP methods separated by single spaces, each of capital letters and `-`
+(`GET HEAD POST OPTIONS PUT`); `<content-types>` `|type/subtype|` items separated by single spaces, in lower case:
+letters, digits and `. + _ -` (`|application/json| |text/plain|`). A list has 1 to 100 items. "Weaker" lists the
+values that print the `SECURITY:` line: "above" compares numbers by value, times by duration, and buffers by count or
+size; a list is weaker when it has an item that the default does not have.
 
 | Variable | Default | What it does | If you weaken it | When you might |
 |---|---|---|---|---|
@@ -83,6 +86,8 @@ def render(rows):
             risk = cell(r["RISK_TEXT"])
         elif weaker.startswith(">"):
             risk = f"Weaker: above {code(weaker[1:])}. {cell(r['RISK_TEXT'])}"
+        elif weaker == "+":
+            risk = f"Weaker: any item that the default does not have. {cell(r['RISK_TEXT'])}"
         else:
             risk = f"Weaker: {', '.join(code(w) for w in weaker.split('|'))}. {cell(r['RISK_TEXT'])}"
         out.append(f'| <a id="{var.lower()}"></a>{code(var)} | {code(r["DEFAULT"])} '
