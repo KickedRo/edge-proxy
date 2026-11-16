@@ -65,9 +65,8 @@ Two workflows, both in `.github/workflows/`:
 Manual dispatch inputs of `build.yml`: `security_epoch` (re-run the upgrade layers) and `force_publish` (publish a
 new patch version even if the build key is unchanged; on `main` only).
 
-There is no Monday publish any more, no publish because `latest` is a few days old, and no `force_skip_check`. With
-versions, an image whose content did not change gets no new version, so `latest` can be weeks old while everything
-is fine. The freshness alarm watches the daily build instead ([below](#the-freshness-alarm)).
+An image whose content did not change gets no new version, so `latest` can be weeks old while everything is fine.
+The freshness alarm watches the daily build instead ([below](#the-freshness-alarm)).
 
 **`freshness.yml`**: daily at 05:47 UTC. Two checks, each with its own issue, opened by the workflow when the check
 does not pass and closed by it when the check passes again:
