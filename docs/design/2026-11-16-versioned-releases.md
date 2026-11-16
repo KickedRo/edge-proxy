@@ -1,6 +1,6 @@
 # Versioned releases and project-style documentation
 
-Status: draft for the maintainers' approval (2026-11-16).
+Status: approved 2026-11-16, implemented in 0.1.0.
 
 ## Why
 

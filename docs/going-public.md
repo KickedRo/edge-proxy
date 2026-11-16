@@ -41,7 +41,9 @@ A record of how this repository is protected, and what is still to do. It is not
 ## Still to do
 
 Two settings for versioned releases (see [maintenance.md](maintenance.md#versions)). They are maintainer actions,
-made by hand in the repository's settings on GitHub:
+made by hand in the repository's settings on GitHub. Switch both on **before the first release** (`0.1.0`, which the
+first push run on `main` with versioned releases publishes): release immutability applies only to Releases published
+after it is switched on, and the ruleset then protects `v0.1.0` from the moment it is created.
 
 - **A tag ruleset for `v*`** (repository Settings → Rules → Rulesets; a ruleset that targets the tags `v*`): restrict
   deletions and restrict updates, with no bypass. A version tag then never moves and never disappears. Do not
