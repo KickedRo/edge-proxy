@@ -114,6 +114,12 @@ LIC=$(docker run --rm --entrypoint sh "$GEN" -c '
   echo ok' 2>&1) || fail licenses_shipped "$LIC"
 expect_eq licenses_shipped "$LIC" ok
 
+# The Go version and module list the release manifest is made from (go version -m of docker-gen).
+MODULES=$(docker run --rm --pull=never --network none --entrypoint cat "$GEN" /usr/local/share/doc/docker-gen/go-modules.txt 2>&1) \
+  || fail gen_go_modules_listed "cannot read go-modules.txt: $MODULES"
+grep -qE '^[[:space:]]*path[[:space:]]' <<<"$MODULES" && grep -qE '^[[:space:]]*dep[[:space:]]' <<<"$MODULES" \
+  && pass gen_go_modules_listed || fail gen_go_modules_listed "no path line or no dep line in go-modules.txt"
+
 # ---- 1. bring the layout up ---------------------------------------------------------------------------------
 # Create (not start) first, so the volumes exist and the certificates can be put in before anything runs.
 OUT=$(compose up --no-start 2>&1) || fail compose_create "$OUT"

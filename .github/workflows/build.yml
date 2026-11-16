@@ -218,6 +218,16 @@ jobs:
         run: |
           tests/build_key_test.sh versions.env edge-proxy:ci "$RUNNER_TEMP/edge-metadata.json" \
             edge-proxy-gen:ci "$RUNNER_TEMP/gen-metadata.json"
+      # What is in the images, for the release manifest and notes: the upstream versions, the Debian packages (the
+      # build key's inputs) and docker-gen's Go version and modules (a file in the gen image).
+      - name: Contents of the tested images
+        run: |
+          mkdir "$RUNNER_TEMP/tested"
+          docker run --rm --pull=never --network none --entrypoint cat edge-proxy-gen:ci \
+            /usr/local/share/doc/docker-gen/go-modules.txt > "$RUNNER_TEMP/go-modules.txt"
+          python3 scripts/release_notes.py contents --versions versions.env \
+            --key-inputs "$RUNNER_TEMP/build-key-inputs.txt" --gen-modules "$RUNNER_TEMP/go-modules.txt" \
+            --out "$RUNNER_TEMP/tested/contents.json"
 
       # What was tested: the archives Trivy scanned and the identity (layer diff IDs + configuration) of the images
       # the smoke tests ran. The publish job pushes these archives and checks the pushed images against these
@@ -225,12 +235,11 @@ jobs:
       - name: Record the tested images
         id: tested
         run: |
-          mkdir "$RUNNER_TEMP/tested"
           mv "$RUNNER_TEMP/scan/edge.tar" "$RUNNER_TEMP/scan/gen.tar" "$RUNNER_TEMP/tested/"
           scripts/publish_tested.sh identity edge-proxy:ci > "$RUNNER_TEMP/tested/edge.json"
           scripts/publish_tested.sh identity edge-proxy-gen:ci > "$RUNNER_TEMP/tested/gen.json"
           cd "$RUNNER_TEMP/tested"
-          sha256sum edge.tar gen.tar edge.json gen.json | tee "$RUNNER_TEMP/SHA256SUMS"
+          sha256sum edge.tar gen.tar edge.json gen.json contents.json | tee "$RUNNER_TEMP/SHA256SUMS"
           {
             echo 'sums<<EOF'
             cat "$RUNNER_TEMP/SHA256SUMS"
@@ -252,6 +261,7 @@ jobs:
             ${{ runner.temp }}/tested/gen.tar
             ${{ runner.temp }}/tested/edge.json
             ${{ runner.temp }}/tested/gen.json
+            ${{ runner.temp }}/tested/contents.json
           if-no-files-found: error
           retention-days: 1
 
@@ -329,7 +339,7 @@ jobs:
         run: |
           cd "$RUNNER_TEMP/tested"
           printf '%s\n' "$SUMS" > "$RUNNER_TEMP/SHA256SUMS"
-          [ "$(wc -l < "$RUNNER_TEMP/SHA256SUMS")" = 4 ] || { echo "expected 4 checksums from build-test" >&2; exit 1; }
+          [ "$(wc -l < "$RUNNER_TEMP/SHA256SUMS")" = 5 ] || { echo "expected 5 checksums from build-test" >&2; exit 1; }
           sha256sum --strict -c "$RUNNER_TEMP/SHA256SUMS"
       # The version of this publish, computed now (not when the pull request was tested): the next patch of the
       # VERSION line after its releases (git tags, :latest version labels), skipping any version either repository

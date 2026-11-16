@@ -1,0 +1,11 @@
+/docker-gen: go1.27.4
+	path	github.com/nginx-proxy/docker-gen/cmd/docker-gen
+	mod	github.com/nginx-proxy/docker-gen	v0.0.0-20260711084634-497e50d07d3a+dirty	
+	dep	dario.cat/mergo	v1.0.2	h1:85+piFYR1tMbRrLcDwR18y4UKJ3aH1Tbzi24VRW1TK8=
+	dep	github.com/BurntSushi/toml	v1.6.0	h1:dRaEfpa2VI55EwlIW72hMRHdWouJeRF7TPYhI+AUQjk=
+	dep	github.com/moby/moby/client	v0.4.1	h1:DMQgisVoMkmMs7fp3ROSdiBnoAu8+vo3GggFl06M/wY=
+	dep	example.com/forked	v1.0.0	h1:AAAA=
+	=>	example.com/fork-of-forked	v1.0.1-fixed	h1:BBBB=
+	dep	golang.org/x/sys	v0.49.0	h1:XbzkgYJHdqh/8m2Uu0W/dQv8nktxx4BFHp1M0gROTXA=
+	build	-buildmode=exe
+	build	-trimpath=true
