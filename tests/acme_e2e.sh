@@ -84,21 +84,31 @@ served_serial() { # -> serial of the certificate edge serves for app.example.com
     printf "%s\n" "$out" | grep -q "^Verification: OK" || { echo "no Verification: OK" >&2; exit 1; }
     printf "%s\n" "$out" | openssl x509 -noout -serial'
 }
-reload_lines() { # -> acme-companion's log lines that name the container it signals for a reload
-  docker logs "$RUN-acme-companion" 2>&1 | grep -E '^Reloading nginx' || true
+reload_lines() { # [file] -> the lines naming the container acme-companion signals for a reload: from the file (the
+  # output of a command run in acme-companion with docker exec, which does not reach its log), else from its log
+  if [ -n "${1:-}" ]; then
+    grep -E '^Reloading nginx' "$1" || true
+  else
+    docker logs "$RUN-acme-companion" 2>&1 | grep -E '^Reloading nginx' || true
+  fi
 }
 # acme-companion signals the gen and edge containers it finds. It prefers labels, which it looks up on the whole Docker
 # host, over the names the override gives it; the test's edge and gen carry none of those labels. Every reload line
-# must name this run's containers, and there must be one of each.
-reloads_own_containers() {
-  local lines; lines=$(reload_lines)
-  grep -qxF "Reloading nginx (using separate container $RUN-nginx-proxy)..." <<<"$lines" || return 1
-  grep -qxF "Reloading nginx docker-gen (using separate container $RUN-nginx-proxy-gen)..." <<<"$lines" || return 1
-  ! grep -vxF -e "Reloading nginx (using separate container $RUN-nginx-proxy)..." \
-    -e "Reloading nginx docker-gen (using separate container $RUN-nginx-proxy-gen)..." <<<"$lines" | grep -q .
+# must name this run's containers, and there must be at least one for each.
+OWN_EDGE_RELOAD="Reloading nginx (using separate container $RUN-nginx-proxy)..."
+OWN_GEN_RELOAD="Reloading nginx docker-gen (using separate container $RUN-nginx-proxy-gen)..."
+reloads_own_containers() { # reload-lines
+  # shellcheck disable=SC2143 # "no other line" is decided by the output itself, never by an exit status
+  grep -qxF "$OWN_EDGE_RELOAD" <<<"$1" && grep -qxF "$OWN_GEN_RELOAD" <<<"$1" \
+    && [ -z "$(grep -vxF -e "$OWN_EDGE_RELOAD" -e "$OWN_GEN_RELOAD" <<<"$1")" ]
 }
-expect_own_reloads() { # name
-  if reloads_own_containers; then pass "$1"; else fail_logs "$1" "acme-companion signalled other containers: $(reload_lines)"; fi
+expect_own_reloads() { # name [file]
+  local lines; lines=$(reload_lines "${2:-}")
+  if reloads_own_containers "$lines"; then
+    pass "$1"
+  else
+    fail_logs "$1" "a reload line names another container, or none names this run's edge or gen: ${lines:-none}"
+  fi
 }
 
 # ---- 0. a shared Docker host --------------------------------------------------------------------------------
@@ -165,6 +175,8 @@ fi
 serves_file_cert() { local f; f=$(file_serial) && [ "$(served_serial)" = "$f" ] && FIRST_SERIAL=$f; }
 wait_until 60 https_serves_issued_cert serves_file_cert
 pass https_serves_issued_cert
+# The reloads after issuance (acme-companion's service, so its log) went to this run's containers only.
+expect_own_reloads issuance_reloads_own_containers
 
 http_is_301() { [ "$(http_status http://app.example.com/)" = 301 ]; }
 wait_until 30 http_redirects_to_https http_is_301
@@ -186,7 +198,8 @@ NOW=$(docker inspect -f '{{.State.StartedAt}} {{.RestartCount}}' "$RUN-nginx-pro
 [ "$NOW" = "$STARTED" ] \
   || fail renewal_served_without_restart "edge was restarted: '$STARTED' before, '$NOW' now (start time, restart count)"
 pass renewal_served_without_restart
-# The renewal's reloads, too, went to this run's containers only.
-expect_own_reloads acme_reloads_own_containers_only
+# The renewal's reloads went to this run's containers only. force_renew runs in the docker exec, so its reload lines are
+# in its own output, not in acme-companion's log.
+expect_own_reloads renewal_reloads_own_containers "$WORK/force_renew.log"
 
 echo "ALL PASS"
