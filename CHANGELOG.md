@@ -30,7 +30,9 @@ changed, on the [Releases page](https://github.com/KickedRo/edge-proxy/releases)
 ### Fixed
 
 - HTTP/3 requests were refused by the WAF: the connector hands ModSecurity no Host header for them, so CRS rule 920280
-  matched every request. The image now skips that rule for HTTP/3 requests only (rule 10002).
+  matched every request. The image now skips that rule for HTTP/3 requests only (rule 10002). The cost, until the
+  connector is fixed: your rules keyed on the Host header do not match over HTTP/3, so one that blocks by host name
+  does not block there; leave HTTP/3 off for such sites ([configuration guide](docs/configuration.md#http3)).
 - With a host folder mounted at `/var/log/nginx`, errors logged at http level (for example by nginx-proxy's template)
   reach `error.log` from the first start, not only after the first reload. When nginx refuses its configuration at
   start, its error is still printed to `docker logs` too.

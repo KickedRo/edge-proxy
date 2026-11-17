@@ -300,8 +300,10 @@ not hand to the ModSecurity connector, so ModSecurity sees no `Host` header and 
 Host Header") would refuse every HTTP/3 request. The image therefore skips rule 920280 **for HTTP/3 requests only**
 (its rule 10002, in `01-http3-host.conf`); HTTP/1.x and HTTP/2 are unchanged. The cost: over HTTP/3, CRS checks that
 read the Host header see none, and so do your own rules and exclusions keyed on the Host header (the examples above
-use `REQUEST_HEADERS:Host`): they do not match HTTP/3 requests until the connector fix ships, so a site that needs
-such an exclusion should leave HTTP/3 off. This is the workaround from
+use `REQUEST_HEADERS:Host`): they do not match HTTP/3 requests until the connector fix ships. An exclusion keyed on
+the host then no longer applies, and a rule of yours that **blocks** by host name **does not block** over HTTP/3: the
+request passes. So leave HTTP/3 off for any site that has rules or exclusions keyed on the Host header. This is the
+workaround from
 [ModSecurity-nginx issue 305](https://github.com/owasp-modsecurity/ModSecurity-nginx/issues/305); the fix is
 [pull request 364](https://github.com/owasp-modsecurity/ModSecurity-nginx/pull/364), which the image does not carry
 yet. The rule will be removed when the connector ships the fix. To keep 920280 active for HTTP/3 anyway (which blocks
@@ -352,9 +354,10 @@ variable holds it; it is printed at start). Use it like nginx-proxy's `dockergen
   `com.github.nginx-proxy.nginx` and `gen` by `com.github.nginx-proxy.docker-gen` (or the `NGINX_PROXY_CONTAINER` and
   `NGINX_DOCKER_GEN_CONTAINER` variables), writes certificates to the shared `certs` volume and challenge files to the
   shared `html` volume, and signals both `gen` and the `edge` container (SIGHUP). The `gen` image sets the `DOCKER_GEN_VERSION` variable acme-companion looks
-  for. This combination is **not exercised by the smoke tests**; [`examples/docker-compose.yml`](../examples/docker-compose.yml)
-  follows acme-companion's documentation for the layout. Its HTTP-01 requests fit the
-  [ACME exemption](#the-acme-challenge-exemption).
+  for. [`examples/docker-compose.yml`](../examples/docker-compose.yml) follows acme-companion's documentation for the
+  layout, and CI runs that file itself (`tests/acme_e2e.sh`, against a local Pebble, Let's Encrypt's test CA): a
+  certificate is issued through `edge` with the WAF on, served, and renewed without restarting `edge`. Its HTTP-01
+  requests fit the [ACME exemption](#the-acme-challenge-exemption).
 
 Give `edge` a restart policy (the example has `restart: unless-stopped`). `gen` (docker-gen 0.14.6 and later) rewrites
 `default.conf` in place, and it rewrites it when `edge` starts, because the template takes its networks from the

@@ -182,3 +182,24 @@ acme-companion, Debian trixie's curl (HTTP/3), GitHub Actions.
 - [ ] **Step 3: CI step** `Certificates end to end (Pebble)` → `tests/acme_e2e.sh edge-proxy:ci edge-proxy-gen:ci`.
 - [ ] **Step 4: Docs + changelog** (example header, README, `### Added`); commit
   `test: certificates issued and renewed through edge (acme-companion + Pebble)`.
+
+## As built
+
+Where the build departed from this plan, and why, so nobody retries what did not work:
+
+- **Task 1: an entrypoint patch, not an `.envsh` script.** The official `/docker-entrypoint.sh` sources `.envsh` files
+  inside a `find | sort -V | while read` loop, which runs in a subshell, so an `exec 2>>…` there never reaches the
+  final `exec nginx`. The image instead inserts one guarded line before the entrypoint's single `exec "$@"`
+  (`edge/Dockerfile`); the build fails unless that line occurs exactly once and the patched file is valid shell.
+  `95-kickedro-error-log.envsh` does not exist.
+- **Task 2: `python:3.13-slim`, pinned by digest.** The unit tests run with the runner's own Python, so there was no
+  Python image to reuse. The streaming backend and the WebSocket client run in `python:3.13-slim`, pinned like the
+  other helper images.
+- **Task 3: the streamed body is sent with `-T -`.** `--data-binary @-` reads stdin to the end and sends a
+  `Content-Length`, so it cannot test a body without one. The test sends the body with
+  `-X POST -H 'Content-Type: application/x-www-form-urlencoded' -T -` and asserts that the audit entry has no
+  `Content-Length` header.
+- **Task 3: rule 10002.** With the WAF on, every HTTP/3 request was refused: the ModSecurity-nginx connector hands
+  ModSecurity no Host header for HTTP/3 (its issue 305), so CRS rule 920280 matched. The maintainers decided to skip
+  920280 for HTTP/3 requests only, with no setting, until the connector ships the fix (its pull request 364):
+  `edge/modsecurity/01-http3-host.conf`, documented in `docs/configuration.md`, "HTTP/3".

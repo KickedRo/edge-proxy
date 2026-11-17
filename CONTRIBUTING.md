@@ -38,12 +38,14 @@ You need Docker with buildx, bash, git, `jq` and Python 3. Every image build and
 ```sh
 python3 scripts/resolve_versions.py --out build/versions.env   # the newest upstream versions, as CI resolves them
 docker buildx build --load --build-context repo=. -t edge-proxy:dev $(sed 's/^/--build-arg /' build/versions.env) edge
-docker buildx build --load --build-context repo=. -t edge-proxy-gen:dev $(sed 's/^/--build-arg /' build/versions.env) gen
+docker buildx build --load --build-context repo=. -t edge-proxy-gen:dev $(sed 's/^/--build-arg /' build/versions.env) \
+  --build-arg SECURITY_EPOCH=$(date -u +%Y%m%d) gen
 ```
 
 `build/` is ignored by git. `--build-context repo=.` is required: both images ship the repository's `LICENSE` and
-`NOTICE`. `scripts/resolve_versions.py` asks the GitHub API; set `GITHUB_TOKEN` if you hit its rate limit. The first
-`edge` build compiles ModSecurity and takes a while; later builds use the cache.
+`NOTICE`. `gen` needs `SECURITY_EPOCH` (CI passes the UTC date to both images, so the security-upgrade layers are
+rebuilt once a day). `scripts/resolve_versions.py` asks the GitHub API; set `GITHUB_TOKEN` if you hit its rate limit.
+The first `edge` build compiles ModSecurity and takes a while; later builds use the cache.
 
 ### Test
 
@@ -55,12 +57,23 @@ tests/release_test.sh
 python3 scripts/check_trivyignore.py .trivyignore.yaml
 tests/edge_smoke.sh edge-proxy:dev
 tests/split_smoke.sh edge-proxy:dev edge-proxy-gen:dev
+tests/streaming_smoke.sh edge-proxy:dev edge-proxy-gen:dev
+tests/acme_e2e.sh edge-proxy:dev edge-proxy-gen:dev
 tests/hardening_smoke.sh edge-proxy:dev
 ```
 
 The smoke tests start containers and networks of their own and remove everything they create, also on failure.
-`tests/split_smoke.sh` publishes two ports on `127.0.0.1`: it takes them from `PORT_1` and `PORT_2` when they are set,
-otherwise Docker picks them.
+
+- **Ports.** `tests/split_smoke.sh` and `tests/streaming_smoke.sh` publish two ports on `127.0.0.1`: they take them
+  from `PORT_1` and `PORT_2` when they are set, otherwise Docker picks them. `tests/acme_e2e.sh` publishes none.
+- **Network.** `tests/split_smoke.sh` builds its HTTP/3 client from Debian's `curl` package, so it needs Debian's
+  package mirror. `tests/acme_e2e.sh` runs on internal Docker networks, so nothing in it can connect to a real CA.
+  Outside DNS is blocked there too on Docker Engine 26.0 and later (CVE-2024-29018, also fixed in 25.0.5); older
+  engines may still forward DNS queries from internal networks to the host's resolvers.
+- **A shared Docker host.** `tests/acme_e2e.sh` refuses to run while any container carries one of acme-companion's
+  discovery labels (`com.github.nginx-proxy.nginx`, `com.github.nginx-proxy.docker-gen` and their older
+  `com.github.jrcs.letsencrypt_nginx_proxy_companion.*` forms): the acme-companion it starts would signal that
+  container.
 
 Without Python on the host, run the unit tests in a container:
 
