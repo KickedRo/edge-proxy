@@ -11,10 +11,10 @@ their defaults and what you lose by weakening them, see the **[settings table](s
 
 Contents: [Mount points](#mount-points-for-your-own-rules-and-config) ·
 [ACME exemption](#the-acme-challenge-exemption) · [What the WAF lets through](#what-the-waf-lets-through-by-default) ·
-[Audit log](#audit-log) · [Block page](#block-page) ·
+[Log files on the host](#log-files-on-the-host) · [Audit log](#audit-log) · [Block page](#block-page) ·
 [Headers](#security-headers-and-hidden-backend-headers) · [Proxy-wide files](#proxy-wide-files-in-confd) ·
 [A replaced nginx.conf](#a-replaced-nginxconf) · [Migrating](#migrating-from-an-existing-nginx-proxy-setup) ·
-[Read-only filesystem](#read-only-root-filesystem) · [The gen image](#the-gen-image)
+[HTTP/3](#http3) · [Read-only filesystem](#read-only-root-filesystem) · [The gen image](#the-gen-image)
 
 ## Mount points for your own rules and config
 
@@ -32,7 +32,7 @@ settings, the CRS setup, the settings from the environment variables, the [ACME 
 the plugins' `*-config.conf` and `*-before.conf`, `custom.d`, the CRS rules, the plugins' `*-after.conf`, the status
 setting that needs the rules, `after.d`.
 
-Use rule IDs from 10100 to 99999 for your own rules (10001 is the image's ACME exemption; the CRS uses 900000 and up).
+Use rule IDs from 10100 to 99999 for your own rules (10001 and 10002 are the image's own rules, the ACME exemption and the HTTP/3 one; the CRS uses 900000 and up).
 Do not reuse the CRS setup IDs the image sets itself (900000, 900110, 900200, 900220, 900250): libmodsecurity accepts
 the duplicate without a message, so the mistake goes unnoticed. To change what they set, use the `MODSEC_*` setting, or
 a `setvar` rule with an ID of your own (as in the examples below).
@@ -169,6 +169,15 @@ fine). They are loaded in the CRS's order: every `*-config.conf`, then every `*-
 every `*-after.conf` after them. Read the plugin's README: some need a setting in their `*-config.conf`, and some
 apply to every host unless you narrow them.
 
+## Log files on the host
+
+With a host folder mounted at `/var/log/nginx`, nginx's own errors, including those of nginx-proxy's template at http
+level (such as `access forbidden by rule`), go to `error.log` there from the first start; without the mount they stay
+in `docker logs`. The audit log stays on stdout unless `MODSEC_AUDIT_LOG` says otherwise. When nginx refuses its
+configuration at start, the image's start-up check (`nginx -T`) also prints nginx's error to `docker logs`; a failure
+that check does not reproduce, such as a port nginx cannot bind or a `default.conf` that `gen` was rewriting at that
+moment ([the gen image](#the-gen-image)), is only in `error.log` there.
+
 ## Audit log
 
 ModSecurity's audit log records blocked requests and other relevant transactions, one JSON object per transaction
@@ -276,6 +285,30 @@ Replace the images and keep your `VIRTUAL_HOST` backends. What differs:
 Your `vhost.d` and `vhost.d/<host>_location` snippets, `htpasswd`, certificates and per-container variables work as
 before, because the template is nginx-proxy's own.
 
+## HTTP/3
+
+`edge`'s nginx is built with HTTP/3. Turn it on per site with the label
+`com.github.nginx-proxy.nginx-proxy.http3.enable=true` on the backend container, or for every site with
+`ENABLE_HTTP3=true` on the **gen** container, and publish UDP port 443 on edge (`- "443:443/udp"`; the example
+compose file has it commented). Browsers learn about it from the `alt-svc` header sent over HTTP/2.
+
+The WAF inspects HTTP/3 requests like the others: the smoke test sends an attack in the URL, in a header and in a
+POST body (also streamed without `Content-Length`) over HTTP/3, and each is blocked with a CRS match in the audit log.
+
+One rule differs for HTTP/3. The authority of an HTTP/3 request is in the `:authority` pseudo-header, which nginx does
+not hand to the ModSecurity connector, so ModSecurity sees no `Host` header and CRS rule 920280 ("Request Missing a
+Host Header") would refuse every HTTP/3 request. The image therefore skips rule 920280 **for HTTP/3 requests only**
+(its rule 10002, in `01-http3-host.conf`); HTTP/1.x and HTTP/2 are unchanged. The cost: over HTTP/3, CRS checks that
+read the Host header see none, and so do your own rules and exclusions keyed on the Host header (the examples above
+use `REQUEST_HEADERS:Host`): they do not match HTTP/3 requests until the connector fix ships. An exclusion keyed on
+the host then no longer applies, and a rule of yours that **blocks** by host name **does not block** over HTTP/3: the
+request passes. So leave HTTP/3 off for any site that has rules or exclusions keyed on the Host header. This is the
+workaround from
+[ModSecurity-nginx issue 305](https://github.com/owasp-modsecurity/ModSecurity-nginx/issues/305); the fix is
+[pull request 364](https://github.com/owasp-modsecurity/ModSecurity-nginx/pull/364), which the image does not carry
+yet. The rule will be removed when the connector ships the fix. To keep 920280 active for HTTP/3 anyway (which blocks
+HTTP/3), put `SecRuleRemoveById 10002` in a file in `custom.d`.
+
 ## Read-only root filesystem
 
 The `edge` container runs with a read-only root filesystem if you give it these writable places:
@@ -321,6 +354,14 @@ variable holds it; it is printed at start). Use it like nginx-proxy's `dockergen
   `com.github.nginx-proxy.nginx` and `gen` by `com.github.nginx-proxy.docker-gen` (or the `NGINX_PROXY_CONTAINER` and
   `NGINX_DOCKER_GEN_CONTAINER` variables), writes certificates to the shared `certs` volume and challenge files to the
   shared `html` volume, and signals both `gen` and the `edge` container (SIGHUP). The `gen` image sets the `DOCKER_GEN_VERSION` variable acme-companion looks
-  for. This combination is **not exercised by the smoke tests**; [`examples/docker-compose.yml`](../examples/docker-compose.yml)
-  follows acme-companion's documentation for the layout. Its HTTP-01 requests fit the
-  [ACME exemption](#the-acme-challenge-exemption).
+  for. [`examples/docker-compose.yml`](../examples/docker-compose.yml) follows acme-companion's documentation for the
+  layout, and CI runs that file itself (`tests/acme_e2e.sh`, against a local Pebble, Let's Encrypt's test CA): a
+  certificate is issued through `edge` with the WAF on, served, and renewed without restarting `edge`. Its HTTP-01
+  requests fit the [ACME exemption](#the-acme-challenge-exemption).
+
+Give `edge` a restart policy (the example has `restart: unless-stopped`). `gen` (docker-gen 0.14.6 and later) rewrites
+`default.conf` in place, and it rewrites it when `edge` starts, because the template takes its networks from the
+`edge` container. An `edge` that starts while `gen` writes can read a half-written file and stop with an `[emerg]` such
+as `unexpected end of file`. With a restart policy Docker starts it again a moment later and it reads the whole file;
+without one it stays down until you start it again. Reloads are not affected: `gen` signals `edge` only after it has
+written the file, and nginx keeps its running configuration when a reload fails.

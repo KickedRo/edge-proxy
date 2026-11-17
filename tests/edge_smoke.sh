@@ -515,4 +515,74 @@ else
   fi
 fi
 
+# ---- 4. http-level errors with a mounted /var/log/nginx --------------------------------------------
+# nginx-proxy's template has "error_log /dev/stderr;" at http level. nginx opens that while reading the
+# configuration, before it points fd 2 at the main-level error.log, so without the entrypoint's redirect (edge/Dockerfile)
+# the errors went to the container output until the first reload.
+mkdir -p "$WORK/logs" "$WORK/conf-errlog.d"
+chmod 755 "$WORK/logs"
+cat > "$WORK/conf-errlog.d/test.conf" <<'CONF'
+error_log /dev/stderr;
+server {
+    listen 80 default_server;
+    server_name app.example.com;
+    location /denied { deny all; }
+}
+CONF
+start "$RUN-errlog" "$NET" --network-alias "$RUN-errlog" -v "$WORK/conf-errlog.d:/etc/nginx/conf.d:ro" \
+  -v "$WORK/logs:/var/log/nginx" "$IMAGE"
+wait_ready "$RUN-errlog"
+expect_eq error_log_mounted_request "$(status "http://$RUN-errlog/denied")" 403
+FOUND=""
+for _ in $(seq 1 50); do
+  grep -q 'access forbidden by rule' "$WORK/logs/error.log" 2>/dev/null && { FOUND=1; break; }
+  sleep 0.2
+done
+[ -n "$FOUND" ] && pass error_log_mounted_first_start || fail error_log_mounted_first_start "no 'access forbidden by rule' in the mounted error.log"
+docker logs "$RUN-errlog" 2>&1 | grep -q 'access forbidden' \
+  && fail error_log_mounted_not_in_container_output "the error is in the container output too" \
+  || pass error_log_mounted_not_in_container_output
+
+# Without the mount the image's default symlink keeps errors in the container output.
+mkdir -p "$WORK/conf-errlog2.d"
+cp "$WORK/conf-errlog.d/test.conf" "$WORK/conf-errlog2.d/test.conf"
+start "$RUN-errlog2" "$NET" --network-alias "$RUN-errlog2" -v "$WORK/conf-errlog2.d:/etc/nginx/conf.d:ro" "$IMAGE"
+wait_ready "$RUN-errlog2"
+expect_eq error_log_default_request "$(status "http://$RUN-errlog2/denied")" 403
+FOUND=""
+for _ in $(seq 1 50); do
+  docker logs "$RUN-errlog2" 2>&1 | grep -q 'access forbidden' && { FOUND=1; break; }
+  sleep 0.2
+done
+[ -n "$FOUND" ] && pass error_log_default_still_in_container_output \
+  || fail error_log_default_still_in_container_output "no 'access forbidden' line in docker logs"
+
+# Why nginx refuses to start must be in "docker logs" also with a mounted log folder, the first place anyone looks: the
+# redirect sends nginx's own [emerg] to error.log only, so the start-up check prints it before that.
+wait_exited() { # container -> waits up to 30 s for it to stop
+  for _ in $(seq 1 150); do
+    [ "$(docker inspect -f '{{.State.Status}}' "$1" 2>/dev/null)" = exited ] && return 0
+    sleep 0.2
+  done
+  docker logs "$1" >&2 || true
+  fail "wait_exited $1" "still running after 30 s"
+}
+BAD_EMERG='nginx: [emerg] unknown directive "bogus_directive" in /etc/nginx/conf.d/bad.conf:3'
+mkdir -p "$WORK/conf-bad.d" "$WORK/logs-bad"
+chmod 755 "$WORK/logs-bad"
+printf 'server {\n    listen 80;\n    bogus_directive on;\n}\n' > "$WORK/conf-bad.d/bad.conf"
+start "$RUN-badconf" "$NET" -v "$WORK/conf-bad.d:/etc/nginx/conf.d:ro" -v "$WORK/logs-bad:/var/log/nginx" "$IMAGE"
+wait_exited "$RUN-badconf"
+grep -qF "$BAD_EMERG" "$WORK/logs-bad/error.log" 2>/dev/null && pass start_error_mounted_in_error_log \
+  || fail start_error_mounted_in_error_log "no '$BAD_EMERG' in the mounted error.log"
+LOGS=$(docker logs "$RUN-badconf" 2>&1) || fail start_error_mounted_in_container_output "cannot read docker logs"
+grep -qF "$BAD_EMERG" <<<"$LOGS" && pass start_error_mounted_in_container_output \
+  || fail start_error_mounted_in_container_output "no '$BAD_EMERG' in docker logs: $(tail -5 <<<"$LOGS")"
+# Without the mount, nginx itself writes it to the container output, as before.
+start "$RUN-badconf2" "$NET" -v "$WORK/conf-bad.d:/etc/nginx/conf.d:ro" "$IMAGE"
+wait_exited "$RUN-badconf2"
+LOGS=$(docker logs "$RUN-badconf2" 2>&1) || fail start_error_default_in_container_output "cannot read docker logs"
+grep -qF "$BAD_EMERG" <<<"$LOGS" && pass start_error_default_in_container_output \
+  || fail start_error_default_in_container_output "no '$BAD_EMERG' in docker logs: $(tail -5 <<<"$LOGS")"
+
 echo "ALL PASS"

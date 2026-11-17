@@ -133,7 +133,9 @@ says so. See [migrating](docs/configuration.md#migrating-from-an-existing-nginx-
 **Freshness and pipeline**
 - A daily build against the newest nginx mainline, ModSecurity, the connector, CRS, docker-gen and Go, within pinned
   major versions, with the Debian security updates.
-- Every build runs unit tests, three smoke tests and a Trivy scan that fails on any fixable HIGH or CRITICAL finding.
+- Every build runs unit tests, the smoke tests and a Trivy scan that fails on any fixable HIGH or CRITICAL finding.
+- Tested in CI with the WAF on: certificates issued and renewed through `edge` (the example compose file, with a local
+  test CA), long-lived connections (WebSocket, server-sent events, long polling) and HTTP/3.
 - Only a build whose content changed is published, as the next patch version. An unchanged build publishes nothing.
 - Alarms open an issue when a scheduled build fails, when the daily build stops, when `latest` is older than 30 days
   or behind upstream nginx, and when nginx-proxy's template has moved past the pin for a week.

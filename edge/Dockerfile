@@ -172,6 +172,25 @@ COPY templates/ /etc/nginx/modsec/templates/
 COPY --chmod=644 settings.tsv settings-lib.sh block-page.html /usr/local/share/kickedro/
 COPY --chmod=755 docker-entrypoint.d/ /docker-entrypoint.d/
 
+# Errors of the http level must reach a mounted /var/log/nginx/error.log from the first start. nginx-proxy's template
+# has "error_log /dev/stderr;" at http level; nginx opens it while reading the configuration, before it points its own
+# stderr at the main-level error.log, so with a mounted log folder those errors would show in the container output
+# until the first reload. The official entrypoint runs the .envsh scripts in a subshell, so only its own process can
+# redirect stderr for the final "exec nginx": one guarded line is inserted before that exec. When error.log is the
+# image's default symlink nothing changes. Start-up lines (SECURITY:, NOTICE:) are printed earlier and stay in the
+# container output, and so does nginx's error when the start-up check (90-kickedro-config-check.sh) sees nginx refuse
+# the configuration; "docker exec ... nginx -t" and "-s reload" do not go through the entrypoint and are unaffected.
+# The build fails if the official entrypoint no longer has exactly one final exec line or the result is not valid
+# shell, so a base-image change cannot silently drop the fix.
+RUN set -eu; \
+    f=/docker-entrypoint.sh; \
+    [ "$(grep -c -x -F 'exec "$@"' "$f")" = 1 ]; \
+    awk '$0 == "exec \"$@\"" { print "if { [ \"$1\" = nginx ] || [ \"$1\" = nginx-debug ]; } && [ ! -L /var/log/nginx/error.log ]; then exec 2>>/var/log/nginx/error.log; fi" } { print }' "$f" > /tmp/entrypoint.new; \
+    sh -n /tmp/entrypoint.new; \
+    cat /tmp/entrypoint.new > "$f"; \
+    rm /tmp/entrypoint.new; \
+    [ "$(grep -c -F 'exec 2>>/var/log/nginx/error.log' "$f")" = 1 ]
+
 # Working directories: ModSecurity temp/data, rendered settings, and the three mount points for site rules and CRS
 # plugins. A read-only root filesystem needs a tmpfs at /etc/nginx/modsec/rendered (written at start), at the
 # stock nginx paths /var/cache/nginx and /run, and at /var/cache/modsecurity.

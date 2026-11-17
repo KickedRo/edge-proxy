@@ -1,0 +1,71 @@
+# Override for tests/acme_e2e.sh, used on top of the published example:
+#   docker compose -f examples/docker-compose.yml -f tests/compose.acme.yml ...
+# Not meant to be run by hand: the script sets the variables below, a unique project name per run, and cleans up.
+#   EDGE_IMAGE, GEN_IMAGE (the images under test), RUN (unique suffix for container names and the nginx container
+#   label), FIXTURES (absolute path of tests/fixtures), PEBBLE_CA_FILE (Pebble's API CA, copied out of its image).
+# It changes only what a test must change: the images under test, per-run names and nginx label (other nginx-proxy
+# setups on a shared Docker host must neither use nor be used by this one), no host ports, networks with no way out,
+# and acme-companion pointed at a local Pebble (Let's Encrypt's test CA) instead of Let's Encrypt. Relative paths would
+# resolve against examples/ (the first file), so fixtures are named by absolute path.
+
+networks:
+  # Internal: no route out and no outside DNS. acme-companion acts on every container of the Docker host that has
+  # ACME_HOST or LETSENCRYPT_HOST, including other setups' (with their own ACME_CA_URI, if they set one); on internal
+  # networks neither it nor Pebble can reach a real CA, resolver or site for them.
+  proxy: # edge, the backend, Pebble (which validates app.example.com through edge)
+    internal: true
+  default: # acme-companion and Pebble
+    internal: true
+
+services:
+  nginx-proxy:
+    image: ${EDGE_IMAGE:?}
+    container_name: ${RUN:?}-nginx-proxy
+    # No host ports: the clients are containers on the proxy network.
+    ports: !reset []
+    networks:
+      proxy:
+        # The site's name resolves to edge on the test network, so Pebble's HTTP-01 request goes through edge.
+        aliases: [app.example.com]
+    # Per-run label instead of com.github.nginx-proxy.nginx: gen is told to look for this one, and neither other
+    # docker-gen setups nor other acme-companions on the Docker host can take this container for "their" nginx.
+    labels: !override
+      - ${RUN:?}.nginx=true
+
+  nginx-proxy-gen:
+    image: ${GEN_IMAGE:?}
+    container_name: ${RUN:?}-nginx-proxy-gen
+    environment:
+      NGINX_CONTAINER_LABEL: ${RUN:?}.nginx
+    # No com.github.nginx-proxy.docker-gen label: other acme-companions on the Docker host would signal this container.
+    # This run's acme-companion finds it by name (NGINX_DOCKER_GEN_CONTAINER below).
+    labels: !reset []
+
+  acme-companion:
+    container_name: ${RUN:?}-acme-companion
+    environment:
+      ACME_CA_URI: https://pebble:14000/dir
+      # Pebble's ACME API has a certificate from its own test CA; acme.sh trusts that CA for the API only.
+      CA_BUNDLE: /pebble.minica.pem
+      # By name, since the edge and gen containers carry no discovery label (see above).
+      NGINX_PROXY_CONTAINER: ${RUN:?}-nginx-proxy
+      NGINX_DOCKER_GEN_CONTAINER: ${RUN:?}-nginx-proxy-gen
+    volumes:
+      - ${PEBBLE_CA_FILE:?}:/pebble.minica.pem:ro
+
+  whoami:
+    container_name: ${RUN:?}-whoami
+
+  pebble:
+    # Pinned by version and digest: ghcr.io/letsencrypt/pebble:2.10.3, the multi-platform image index.
+    image: ghcr.io/letsencrypt/pebble@sha256:0c81f05db371f436c97fb894bd6d2ab8fc9c8e2ce40f8bef8a8e15941bcd75ef
+    container_name: ${RUN:?}-pebble
+    # tests/fixtures/pebble-config.json is Pebble's default configuration (test/config/pebble-config.json of this
+    # version) with "httpPort": 80, so HTTP-01 is validated on the port edge serves.
+    command: ["-config", "/test/my-config.json"]
+    environment:
+      PEBBLE_VA_NOSLEEP: "1" # validate at once, not after a random delay of up to 15 s
+      PEBBLE_WFE_NONCEREJECT: "0" # do not reject a share of valid nonces (a robustness test for clients, not for edge)
+    networks: [proxy, default]
+    volumes:
+      - ${FIXTURES:?}/pebble-config.json:/test/my-config.json:ro

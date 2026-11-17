@@ -21,13 +21,13 @@ Two workflows, both in `.github/workflows/`:
    reading what changed in nginx-proxy's template ([below](#moving-the-nginx-proxy-pin)). The job also reads the
    release line from `VERSION` (`scripts/publish_tested.sh line`), so a malformed `VERSION` fails every run, pull
    requests included.
-2. `build-test`: builds both images, runs the unit tests (with `tests/release_test.sh`), the three smoke tests
-   (`tests/edge_smoke.sh`, `tests/split_smoke.sh`, `tests/hardening_smoke.sh`) and the Trivy scan, computes the
-   **build key**, lists what is inside the images (upstream versions, Debian packages, docker-gen's Go modules), and
-   rehearses publishing against a throw-away local registry. The daily `SECURITY_EPOCH` build argument re-runs only
-   the security-upgrade layers (apt upgrade; docker-gen's vulnerability-driven module upgrades), so the expensive
-   ModSecurity compile stays cached. The images built here carry the version label `X.Y-dev`; the version is chosen
-   when they are published.
+2. `build-test`: builds both images, runs the unit tests (with `tests/release_test.sh`), the five Docker tests
+   (`tests/edge_smoke.sh`, `tests/split_smoke.sh`, `tests/streaming_smoke.sh`, `tests/acme_e2e.sh`,
+   `tests/hardening_smoke.sh`) and the Trivy scan, computes the **build key**, lists what is inside the images
+   (upstream versions, Debian packages, docker-gen's Go modules), and rehearses publishing against a throw-away local
+   registry. The daily `SECURITY_EPOCH` build argument re-runs only the security-upgrade layers (apt upgrade;
+   docker-gen's vulnerability-driven module upgrades), so the expensive ModSecurity compile stays cached. The images
+   built here carry the version label `X.Y-dev`; the version is chosen when they are published.
 3. `publish` (only on `main`, never for pull requests, only after `build-test` passed; most steps are in
    `scripts/publish_tested.sh`):
    1. **Decide.** It reads the git tags `v*` of the repository on GitHub (`git ls-remote`, see

@@ -13,6 +13,30 @@ changed, on the [Releases page](https://github.com/KickedRo/edge-proxy/releases)
 
 ## [Unreleased]
 
+### Added
+
+- HTTP/3 in the split-layout smoke test (`tests/split_smoke.sh`): a site with the HTTP/3 label answers over HTTP/3,
+  sends `alt-svc` over HTTP/2, and attacks in the URL, a header, a form body and a body streamed without
+  `Content-Length` are blocked by the CRS over HTTP/3; rule 920280 still applies to other protocols. Documented in the
+  configuration guide, with the UDP port in the example compose file.
+- A smoke test for long-lived connections through the WAF (`tests/streaming_smoke.sh`): WebSocket echo across a 20 s
+  idle period, server-sent events and streamed HTML arriving as they are produced, a 25 s long poll, and attacks on the
+  same routes still blocked.
+- An end-to-end certificate test (`tests/acme_e2e.sh`) that runs the example compose file itself, with acme-companion
+  pointed at a local Pebble (Let's Encrypt's test CA): a certificate is issued through `edge` (the HTTP-01 challenge
+  passes the WAF), served, and renewed without restarting `edge`; acme-companion must signal only the test's own
+  containers.
+
+### Fixed
+
+- HTTP/3 requests were refused by the WAF: the connector hands ModSecurity no Host header for them, so CRS rule 920280
+  matched every request. The image now skips that rule for HTTP/3 requests only (rule 10002). The cost, until the
+  connector is fixed: your rules keyed on the Host header do not match over HTTP/3, so one that blocks by host name
+  does not block there; leave HTTP/3 off for such sites ([configuration guide](docs/configuration.md#http3)).
+- With a host folder mounted at `/var/log/nginx`, errors logged at http level (for example by nginx-proxy's template)
+  reach `error.log` from the first start, not only after the first reload. When nginx refuses its configuration at
+  start, its error is still printed to `docker logs` too.
+
 ## [0.1.0] - 2026-11-17
 
 > **Upgrading:** images published before 0.1.0 have date-based tags (for example

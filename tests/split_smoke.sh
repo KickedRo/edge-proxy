@@ -2,7 +2,8 @@
 # Smoke test for the separate-containers layout: tests/split_smoke.sh EDGE_IMAGE GEN_IMAGE
 # Runs the edge image (nginx + ModSecurity) and the gen image (docker-gen + nginx-proxy's template, with its real
 # default command) the way nginx-proxy's docker-compose-separate-containers.yml does, in front of a tiny echo backend
-# and a plain nginx backend that sends headers of its own.
+# and a plain nginx backend that sends headers of its own. HTTP/3 is tested from a client container on the test network
+# (the per-run image ${RUN}-h3client, built from tests/fixtures/h3-client.Dockerfile, removed on exit).
 # Prints "PASS <name>" per assertion, stops at the first failure. The compose project, its volumes, containers
 # and every temp file are removed on exit (also on failure). Host ports: 127.0.0.1 only, taken from PORT_1 and
 # PORT_2 when they are set, else picked by Docker.
@@ -23,10 +24,22 @@ RUN="splittest-$$-$RANDOM"
 WORK=$(mktemp -d)
 export RUN BACKEND_IMAGE HEADERS_BACKEND_IMAGE EDGE_IMAGE=$EDGE GEN_IMAGE=$GEN HTTP_PORT=${PORT_1:-} HTTPS_PORT=${PORT_2:-}
 compose() { docker compose -p "$RUN" --profile '*' -f "$HERE/compose.smoke.yml" "$@"; }
+notice_restarts() { # container -> a NOTICE line when edge's restart policy restarted it (compose.smoke.yml says why), so
+  # a crash the policy hid still shows in the CI log, with nginx's errors from before its last start
+  local info n errors
+  info=$(docker inspect -f '{{.RestartCount}} {{.State.StartedAt}}' "$1" 2>/dev/null) || return 0
+  n=${info%% *}
+  [ "$n" -gt 0 ] 2>/dev/null || return 0
+  errors=$(docker logs --until "${info#* }" "$1" 2>&1 | grep -E '\[(emerg|alert|crit)\]' | tail -5) || true
+  echo "NOTICE: edge restarted $n time(s) at start${errors:+; errors before its last start:}" >&2
+  [ -z "$errors" ] || printf '%s\n' "$errors" >&2
+}
 cleanup() {
+  notice_restarts "$RUN-edge"
   compose down -v --remove-orphans --timeout 5 >/dev/null 2>&1 || true
   # Anything compose could not remove (a failed 'up' before the project existed).
-  docker rm -f -v "$RUN-edge" "$RUN-gen" "$RUN-whoami" "$RUN-broken" "$RUN-headers" >/dev/null 2>&1 || true
+  docker rm -f -v "$RUN-edge" "$RUN-gen" "$RUN-whoami" "$RUN-broken" "$RUN-headers" "$RUN-h3" >/dev/null 2>&1 || true
+  docker rmi -f "$RUN-h3client" >/dev/null 2>&1 || true
   rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -57,12 +70,18 @@ http_status() { # path [curl args...]
   curl -s -g -o /dev/null -w '%{http_code}' --max-time 10 --resolve "app.example.com:$HTTP_HOST_PORT:127.0.0.1" \
     "$@" "http://app.example.com:$HTTP_HOST_PORT$p" || true
 }
-wait_until() { # seconds name command...
-  local secs=$1 what=$2 i; shift 2
-  for i in $(seq 1 $((secs * 5))); do "$@" >/dev/null 2>&1 && return 0; sleep 0.2; done
-  docker logs "$RUN-gen" 2>&1 | tail -20 >&2 || true
-  docker logs "$RUN-edge" 2>&1 | tail -20 >&2 || true
-  fail "$what" "not true after ${secs}s"
+wait_until() { # seconds name command... -> polls until the command succeeds, by the clock (a probe that is slow itself
+  # does not stretch the limit); on timeout dumps the logs and fails
+  local secs=$1 what=$2 end; shift 2
+  end=$((SECONDS + secs))
+  until "$@" >/dev/null 2>&1; do
+    if [ "$SECONDS" -ge "$end" ]; then
+      docker logs "$RUN-gen" 2>&1 | tail -20 >&2 || true
+      docker logs "$RUN-edge" 2>&1 | tail -20 >&2 || true
+      fail "$what" "not true after ${secs}s"
+    fi
+    sleep 0.2
+  done
 }
 edge_conf_has() { docker exec "$RUN-edge" grep -q -- "$1" /etc/nginx/conf.d/default.conf; }
 edge_conf_lacks() { ! edge_conf_has "$1"; }
@@ -125,7 +144,7 @@ grep -qE '^[[:space:]]*path[[:space:]]' <<<"$MODULES" && grep -qE '^[[:space:]]*
 OUT=$(compose up --no-start 2>&1) || fail compose_create "$OUT"
 OUT=$(volume_run nginx_certs --entrypoint sh "$GEN" -c '
   set -e; cd /v
-  for h in app.example.com broken.example.com headers.example.com; do
+  for h in app.example.com broken.example.com headers.example.com h3.example.com; do
     openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=$h" -addext "subjectAltName=DNS:$h" \
       -keyout "$h.key" -out "$h.crt" 2>/dev/null
     chmod 600 "$h.key"
@@ -134,7 +153,7 @@ OUT=$(volume_run nginx_certs --entrypoint sh "$GEN" -c '
 OUT=$(volume_run nginx_conf --entrypoint sh "$GEN" -c \
   "{ echo 'server_tokens off;'; echo 'client_max_body_size 100m;'; } > /v/my_proxy.conf" 2>&1) \
   || fail setup "could not write my_proxy.conf: $OUT"
-OUT=$(compose up -d whoami headers nginx-proxy nginx-proxy-gen 2>&1) || fail compose_up "$OUT"
+OUT=$(compose up -d whoami headers h3 nginx-proxy nginx-proxy-gen 2>&1) || fail compose_up "$OUT"
 
 HTTP_HOST_PORT=$(compose port nginx-proxy 80 | sed 's/.*://') || fail setup "could not read the published HTTP port"
 HTTPS_HOST_PORT=$(compose port nginx-proxy 443 | sed 's/.*://') || fail setup "could not read the published HTTPS port"
@@ -245,5 +264,78 @@ broken_served() {
 }
 wait_until 30 gen_reload_reaches_edge broken_served
 pass gen_reload_reaches_edge
+
+# ---- 4. HTTP/3 ------------------------------------------------------------------------------------------------
+# h3.example.com's backend has the nginx-proxy label that turns HTTP/3 on for its vhost. The client is a container on
+# the test network (no UDP port is published on the host); Alpine's and the curl project's images lack HTTP/3.
+OUT=$(docker build -q -t "$RUN-h3client" -f "$HERE/fixtures/h3-client.Dockerfile" "$WORK" 2>&1) \
+  || fail h3_client_image "cannot build the HTTP/3 client image: $OUT"
+OUT=$(docker run --rm "$RUN-h3client" curl -V 2>&1) || fail h3_client_image "curl -V failed: $OUT"
+grep -q '^Features:.* HTTP3\b' <<<"$OUT" && pass h3_client_image || fail h3_client_image "curl has no HTTP3 feature: $OUT"
+EDGE_IP=$(docker inspect -f "{{(index .NetworkSettings.Networks \"${RUN}_proxy\").IPAddress}}" "$RUN-edge") || fail setup "cannot read the edge's address"
+[ -n "$EDGE_IP" ] || fail setup "the edge has no address on the test network"
+h3() { # curl args... -> curl over HTTP/3 only, from the client container; a body for --data-binary @- comes from stdin
+  docker run --rm -i --network "${RUN}_proxy" "$RUN-h3client" \
+    curl -s -g -k --http3-only --max-time 20 --resolve "h3.example.com:443:$EDGE_IP" "$@" || true
+}
+h3_status() { h3 -o /dev/null -w '%{http_code}' "$@" </dev/null; }
+audit_rule() { # marker rule-id-prefix -> true when an audit entry for a request whose uri contains marker matched a
+  # rule whose ID starts with the prefix, and none of the entry's matches is 920280 (missing Host header)
+  docker logs "$RUN-edge" 2>/dev/null | grep '^{"transaction"' \
+    | jq -e --arg m "$1" --arg p "$2" 'select((.transaction.request.uri // "") | contains($m))
+        | select(any(.transaction.messages[]?; (.details.ruleId // "") | startswith($p)))
+        | select(all(.transaction.messages[]?; .details.ruleId != "920280"))' >/dev/null 2>&1
+}
+wait_until 30 h3_listening edge_conf_has 'listen 443 quic'
+# Short tries (curl uses the last --max-time given), so a stalled QUIC handshake still gets several within the wait.
+h3_answers() { [ "$(h3_status --max-time 5 https://h3.example.com/)" = 200 ]; }
+wait_until 30 h3_up h3_answers
+
+expect_eq h3_get "$(h3 -o /dev/null -w '%{http_code} %{http_version}' https://h3.example.com/ </dev/null)" '200 3'
+https_request h3.example.com /
+grep -qE '(^|[ ,;])h3=' <<<"$(header Alt-Svc)" && pass h3_alt_svc || fail h3_alt_svc "no alt-svc naming h3 over HTTP/2: $HEAD"
+
+H3_XSS='<script>alert(1)</script>'
+expect_eq h3_url_attack_blocked "$(h3_status "https://h3.example.com/?t=h3_url&q=$H3_XSS")" 403
+wait_until 10 h3_url_attack_blocked audit_rule t=h3_url 941
+
+expect_eq h3_header_attack_blocked "$(h3_status -H 'User-Agent: () { :; }; echo; /bin/cat /etc/passwd' "https://h3.example.com/?t=h3_hdr")" 403
+wait_until 10 h3_header_attack_blocked audit_rule t=h3_hdr 932
+
+expect_eq h3_body_attack_blocked "$(h3_status --data "q=$H3_XSS" "https://h3.example.com/?t=h3_body")" 403
+wait_until 10 h3_body_attack_blocked audit_rule t=h3_body 941
+
+# No Content-Length: -T - uploads stdin of unknown size, which curl sends as a stream (--data-binary @- reads it all and
+# sends a length). The WAF must still inspect it; the audit entry must show the request really had no length.
+STREAMED=$(echo "q=$H3_XSS" | h3 -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/x-www-form-urlencoded' \
+  -T - "https://h3.example.com/?t=h3_stream")
+expect_eq h3_streamed_body_attack_blocked "$STREAMED" 403
+wait_until 10 h3_streamed_body_attack_blocked audit_rule t=h3_stream 941
+audit_without_length() { # marker -> true when the audit entry for that request has no Content-Length header
+  docker logs "$RUN-edge" 2>/dev/null | grep '^{"transaction"' \
+    | jq -e --arg m "$1" 'select((.transaction.request.uri // "") | contains($m))
+        | select([.transaction.request.headers | keys[] | ascii_downcase] | index("content-length") | not)' >/dev/null 2>&1
+}
+wait_until 10 h3_streamed_body_has_no_content_length audit_without_length t=h3_stream
+pass h3_streamed_body_has_no_content_length
+
+expect_eq h3_legit_post "$(h3_status --data 'name=alice' https://h3.example.com/)" 200
+
+# A non-file body over MODSEC_REQ_BODY_NOFILES_LIMIT (1048576 bytes) is refused, as over HTTP/1.1 (compared here, so a
+# change in the limit shows up as a difference between the protocols and not as a silent pass).
+{ printf 'q='; head -c 1048575 /dev/zero | tr '\0' a; } > "$WORK/big_form.txt"
+H1_BIG=$(https_status / --data-binary "@$WORK/big_form.txt")
+expect_eq h3_body_limit "$(h3 -o /dev/null -w '%{http_code}' --data-binary @- https://h3.example.com/ < "$WORK/big_form.txt")" "$H1_BIG"
+expect_eq h3_body_limit_refused "$H1_BIG" 403
+
+# The 920280 exclusion is for HTTP/3 only: an HTTP/1.0 request without a Host header is still refused by that rule.
+# The absolute-form request target lets nginx route it to app.example.com without a Host header.
+expect_eq host_rule_kept_for_http1 "$(https_status / --http1.0 -H 'Host:' --request-target 'http://app.example.com/?t=h1_nohost')" 403
+audit_920280() {
+  docker logs "$RUN-edge" 2>/dev/null | grep '^{"transaction"' \
+    | jq -e 'select((.transaction.request.uri // "") | contains("t=h1_nohost"))
+        | select(any(.transaction.messages[]?; .details.ruleId == "920280"))' >/dev/null 2>&1
+}
+wait_until 10 host_rule_kept_for_http1 audit_920280
 
 echo "ALL PASS"
