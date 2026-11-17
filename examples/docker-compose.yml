@@ -1,6 +1,7 @@
 # nginx-proxy's "separate containers" layout with the edge and gen images, plus acme-companion for Let's Encrypt
 # certificates. The edge/gen part follows tests/compose.smoke.yml, which the CI smoke tests run; the acme-companion
-# part follows its own documentation and is not exercised by those tests.
+# part follows its own documentation. CI runs this file itself in tests/acme_e2e.sh, against a local Pebble (Let's
+# Encrypt's test CA): a certificate is issued through edge, served, and renewed.
 #
 # Change before use: the host names (example.com is a placeholder), the e-mail address, and the Docker socket path
 # if you do not run rootful Docker. Then: docker compose up -d

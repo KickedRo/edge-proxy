@@ -22,6 +22,10 @@ changed, on the [Releases page](https://github.com/KickedRo/edge-proxy/releases)
 - A smoke test for long-lived connections through the WAF (`tests/streaming_smoke.sh`): WebSocket echo across a 20 s
   idle period, server-sent events and streamed HTML arriving as they are produced, a 25 s long poll, and attacks on the
   same routes still blocked.
+- An end-to-end certificate test (`tests/acme_e2e.sh`) that runs the example compose file itself, with acme-companion
+  pointed at a local Pebble (Let's Encrypt's test CA): a certificate is issued through `edge` (the HTTP-01 challenge
+  passes the WAF), served, and renewed without restarting `edge`; acme-companion must signal only the test's own
+  containers.
 
 ### Fixed
 

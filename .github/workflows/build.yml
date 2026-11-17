@@ -173,6 +173,8 @@ jobs:
         run: tests/split_smoke.sh edge-proxy:ci edge-proxy-gen:ci
       - name: Long-lived connections smoke test
         run: tests/streaming_smoke.sh edge-proxy:ci edge-proxy-gen:ci
+      - name: Certificates end to end (Pebble)
+        run: tests/acme_e2e.sh edge-proxy:ci edge-proxy-gen:ci
       - name: Hardening smoke test
         run: tests/hardening_smoke.sh edge-proxy:ci
 
