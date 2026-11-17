@@ -1,8 +1,11 @@
 name: freshness
 
 # Alarm for a pipeline that silently stopped: fails, and opens an "Image stale or behind upstream" issue (unless one
-# is open), when a published :latest is older than max_age_days (default 8: the build publishes at least every
-# Monday) or its nginx is older than upstream's current mainline; closes that issue once the images are healthy.
+# is open), when the newest completed scheduled build run on main did not succeed or is older than 2 days, when a
+# published :latest is older than max_age_days (default 30), or when its nginx is older than upstream's current
+# mainline; closes that issue once all is healthy. The image age alone no longer tells: the build publishes only
+# when something changed (no weekly publish), so an unchanged image is legitimately weeks old. The daily build
+# succeeding is the signal that the pipeline lives; the age is only a backstop.
 # Alarm for nginx-proxy's template moving on: opens a "nginx-proxy template moved past the pin" issue when nginx-proxy's
 # main has had changes to the template for more than 7 days that the pin in pins.env does not have; closes it once the
 # pin has been moved (by hand, after review: docs/maintenance.md).
@@ -14,7 +17,7 @@ on:
       max_age_days:
         description: "Maximum age of :latest in whole days"
         required: false
-        default: "8"
+        default: "30"
         type: string
 
 permissions:
@@ -36,6 +39,7 @@ jobs:
     permissions:
       contents: read # checkout
       packages: read # read the published :latest images, in case they are not public
+      actions: read # the runs of build.yml
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -53,12 +57,17 @@ jobs:
       - name: Check the published images
         env:
           MAX_AGE_DAYS: ${{ inputs.max_age_days }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
+          gh api "repos/$GH_REPO/actions/workflows/build.yml/runs?branch=main&event=schedule&status=completed&per_page=1" \
+            > "$RUNNER_TEMP/last-build.json"
           for image in edge-proxy edge-proxy-gen; do
             docker buildx imagetools inspect "ghcr.io/kickedro/$image:latest" --format '{{json .Image}}' \
               > "$RUNNER_TEMP/$image.json"
           done
-          python3 scripts/check_freshness.py --resolved "$RUNNER_TEMP/versions.env" --max-age-days "${MAX_AGE_DAYS:-8}" \
+          python3 scripts/check_freshness.py --resolved "$RUNNER_TEMP/versions.env" --max-age-days "${MAX_AGE_DAYS:-30}" \
+            --last-build "$RUNNER_TEMP/last-build.json" --max-build-age-days 2 \
             "edge=$RUNNER_TEMP/edge-proxy.json" "gen=$RUNNER_TEMP/edge-proxy-gen.json" | tee -a "$GITHUB_STEP_SUMMARY"
 
   # nginx-proxy's main against NGINX_PROXY_REF (scripts/check_template_pin.py): fails when main has commits touching

@@ -60,7 +60,8 @@ RUN set -eux; \
     go build -trimpath -ldflags "-X main.buildVersion=${DOCKER_GEN_VERSION}" -o /docker-gen ./cmd/docker-gen; \
     /docker-gen -version; \
     echo "--- docker-gen build info"; \
-    go version -m /docker-gen
+    go version -m /docker-gen > /go-modules.txt; \
+    cat /go-modules.txt
 
 # ---- final image: same layout as nginx-proxy's Dockerfile.dockergen (Debian flavour) --------------------------
 # What upstream's docker-gen Debian image provides: debian slim, openssl, the binary in /usr/local/bin, the license.
@@ -91,6 +92,8 @@ RUN mkdir -p /etc/nginx/conf.d /etc/nginx/vhost.d /etc/nginx/htpasswd /etc/nginx
 
 COPY --from=build /docker-gen /usr/local/bin/docker-gen
 COPY --from=build /src/LICENSE /usr/local/share/doc/docker-gen/
+# The Go version and every module compiled into the binary (go version -m), for the release manifest.
+COPY --from=build /go-modules.txt /usr/local/share/doc/docker-gen/go-modules.txt
 COPY --from=build /nginx-proxy/app /nginx-proxy/nginx.tmpl /nginx-proxy/LICENSE /app/
 # Licence texts of what the image contains (docker-gen, nginx-proxy) plus this repository's own LICENSE and NOTICE
 # (named build context "repo" = the repository root: build with --build-context repo=. as the CI workflow does).

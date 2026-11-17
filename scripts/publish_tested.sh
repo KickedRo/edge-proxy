@@ -7,29 +7,47 @@
 #     (sha256 of each uncompressed layer, i.e. the filesystem bit for bit) and the runtime configuration as
 #     `docker image inspect` shows it (env, entrypoint, cmd, user, working dir, labels, ...), without the two labels
 #     that are set when publishing: org.kickedro.build-key (it only exists after testing) and
-#     org.opencontainers.image.version (the release tag, chosen at publish time). Timestamps and image ids are not
-#     part of it.
+#     org.opencontainers.image.version (the version, chosen at publish time). Timestamps and image ids are not part of
+#     it.
 #
-#   scripts/publish_tested.sh decide KEY WEEKDAY FORCE_PUBLISH FORCE_SKIP_CHECK REPOSITORY...
+#   scripts/publish_tested.sh line VERSION_FILE
+#     Prints the release line MAJOR.MINOR that VERSION_FILE holds: exactly one line of two numbers without leading
+#     zeros (at most 4 digits each), a final newline allowed; anything else (CR, spaces, a third component, a second
+#     line, an empty file) fails.
+#
+#   scripts/publish_tested.sh decide KEY LINE TAGS_FILE FORCE_PUBLISH REPOSITORY...
 #     Prints "true" (publish) or "false" (skip); the reasons go to stderr. Publish when the :latest of any
 #     REPOSITORY does not carry KEY as its org.kickedro.build-key label (a missing or unreadable :latest counts as
-#     different), or WEEKDAY (ISO 8601, 1 = Monday, UTC) is 1 and FORCE_SKIP_CHECK is not true (weekly publish), or
-#     the :latest of any REPOSITORY was created more than 6 whole days ago (a missed weekly publish is made up the
-#     next day; counted in whole days so the run on the Sunday before the weekly publish does not publish as well),
-#     or FORCE_PUBLISH is true. PUBLISH_DECIDE_NOW (seconds since the epoch) replaces the current time, for tests.
+#     different), or LINE has no release yet, or FORCE_PUBLISH is true. LINE has a release when TAGS_FILE (the git
+#     tags, one per line; only vMAJOR.MINOR.PATCH ones count) has a vLINE.N tag, or the :latest of every REPOSITORY
+#     carries a LINE.N version label (a release whose git tag is missing must not publish again; one that reached only
+#     some of the images must). Fails when LINE is lower than a released version (see next-version).
 #
-#   scripts/publish_tested.sh release-tag REPOSITORY BASE_TAG
-#     Prints the release tag for a publish now: BASE_TAG (the versions and the UTC date) if REPOSITORY has no such tag
-#     yet, else the first of BASE_TAG.2, BASE_TAG.3, ... it does not have. A published release tag never moves. Fails
-#     when the registry cannot tell whether a tag exists.
+#   scripts/publish_tested.sh next-version LINE TAGS_FILE REPOSITORY...
+#     Prints the version of a publish now, LINE.N: N is one more than the highest PATCH of LINE among the git tags
+#     vMAJOR.MINOR.PATCH in TAGS_FILE (one per line; other lines are ignored) and the version labels of each
+#     REPOSITORY's :latest (when they are MAJOR.MINOR.PATCH), or 0 when there is none; then the first LINE.N, LINE.N+1,
+#     ... that no REPOSITORY has as an image tag (at most 100 tried). A version is never re-used. Fails when any of
+#     those versions is on a higher MAJOR.MINOR than LINE (VERSION must not go back), or when the registry cannot
+#     tell whether a :latest or a tag exists.
+#
+#   scripts/publish_tested.sh released TAGS_FILE REPOSITORY...
+#     For a run that publishes nothing: the version each REPOSITORY's :latest carries (its version label, when it is
+#     MAJOR.MINOR.PATCH) must have its git tag vMAJOR.MINOR.PATCH in TAGS_FILE (as for next-version), which only
+#     publishing its GitHub Release creates (a draft has none). Fails otherwise, with "Release vX.Y.Z is missing: ..."
+#     once per missing version, so the run stays red until the failed release job is re-run. When not every
+#     REPOSITORY's :latest carries that version, the publish job stopped between tagging the images (only a
+#     force_publish run then leaves the next runs nothing to publish) and no release job ran: the message says to
+#     re-run the publish job instead. Other labels (the date-based tags from before versions) and a missing :latest are
+#     not checked. Fails when the registry cannot tell.
 #
 #   scripts/publish_tested.sh push ARCHIVE TESTED_IDENTITY REPOSITORY KEY RELEASE_TAG
 #     Publishes the tested image without rebuilding it. ARCHIVE is `docker save` of the tested image (an OCI image
 #     layout since Docker 25); a one-line Dockerfile `FROM tested`, with the archive as the named build context
 #     "tested", adds the org.kickedro.build-key label KEY and the org.opencontainers.image.version label RELEASE_TAG
-#     (configuration changes, no layer) and is pushed by digest only (no tag), with buildx's SBOM attestation (syft
-#     scanner pinned below) and provenance (mode=max; builder id from PROVENANCE_BUILDER_ID when set). Then `check`
-#     must pass. Prints the pushed digest (of the manifest index).
+#     (the version, X.Y.Z; configuration changes, no layer) and is pushed by digest only (no tag), with buildx's SBOM
+#     attestation (syft scanner pinned below) and provenance (mode=max; builder id from PROVENANCE_BUILDER_ID when
+#     set). Then `check` must pass. Prints the pushed digest (of the manifest index).
 #
 #   scripts/publish_tested.sh check TESTED_IDENTITY REF KEY RELEASE_TAG
 #     The same-bits check: pulls REF and requires its org.kickedro.build-key label to be KEY, its
@@ -39,8 +57,9 @@
 #
 #   scripts/publish_tested.sh tag REPOSITORY DIGEST TAG...
 #     Points each TAG at DIGEST (`docker buildx imagetools create` with a single manifest-index source re-tags it
-#     unchanged) and verifies that every tag now resolves to DIGEST. Only `latest` may move: any other TAG that already
-#     points elsewhere is refused before anything is tagged.
+#     unchanged) and verifies that every tag now resolves to DIGEST. Only `latest` and MAJOR.MINOR tags (the newest
+#     patch of a line) may move: any other TAG, a version X.Y.Z above all, that already points elsewhere is refused
+#     before anything is tagged.
 #
 # The buildx builder is the current one (BUILDX_BUILDER selects another); registry credentials come from
 # `docker login`. Exit 0 on success, 2 on usage errors, another non-zero status on any failure.
@@ -51,6 +70,9 @@ SBOM_GENERATOR=docker/buildkit-syft-scanner@sha256:873a7458c3c8ac8e32c7b796c10e1
 KEY_LABEL=org.kickedro.build-key
 VERSION_LABEL=org.opencontainers.image.version
 TAG_RE='^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$'
+LINE_RE='^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$'                     # MAJOR.MINOR, as VERSION holds it
+VERSION_RE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'          # MAJOR.MINOR.PATCH
+MOVABLE_RE='^(latest|(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))$'                  # the image tags that may move
 
 die() { echo "publish_tested: $*" >&2; exit 1; }
 usage() { grep '^#   scripts/publish_tested.sh ' "$0" | sed 's/^#   /usage: /' >&2; exit 2; }
@@ -75,77 +97,182 @@ digest_of() { # REF: the digest REF resolves to, or nothing when the registry ha
   fi
 }
 
-release_tag() {
-  [ $# -eq 2 ] || usage
-  local repo=$1 base=$2 n t got
-  [[ $base =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,124}$ ]] || die "not a valid base tag: '$base'"
-  for n in $(seq 1 99); do
-    t=$base
-    [ "$n" = 1 ] || t="$base.$n"
-    got=$(digest_of "$repo:$t") || exit 1 # the registry could not tell: never guess
-    if [ -z "$got" ]; then
-      echo "$t"
-      return 0
-    fi
-    echo "taken: $repo:$t ($got)" >&2
-  done
-  die "no free release tag from $base to $base.99"
-}
-
-latest_info() { # REPOSITORY: "<build key> <created>" of REPOSITORY:latest ("-" for a missing field), or nothing
+latest_info() { # REPOSITORY: "<build key> <version>" labels of REPOSITORY:latest ("-" for a missing one), or nothing
   local out
   if ! out=$(docker buildx imagetools inspect "$1:latest" --format '{{json .Image}}' 2>&1); then
     echo "$1:latest: not readable (${out//$'\n'/ })" >&2
     return 0
   fi
-  jq -r --arg l "$KEY_LABEL" '"\(.config.Labels[$l] // "-") \(.created // "-")"' <<<"$out" 2>/dev/null || true
+  jq -r --arg k "$KEY_LABEL" --arg v "$VERSION_LABEL" \
+    '"\(.config.Labels[$k] // "-") \(.config.Labels[$v] // "-")"' <<<"$out" 2>/dev/null || true
+}
+
+latest_version() { # REPOSITORY: the version label of REPOSITORY:latest, nothing when it has none or there is no
+                   # :latest; fails when the registry cannot tell
+  local out
+  if out=$(docker buildx imagetools inspect "$1:latest" --format '{{json .Image}}' 2>&1); then
+    jq -er --arg v "$VERSION_LABEL" '.config | objects | .Labels[$v] // ""' <<<"$out" \
+      || die "$1:latest: no image configuration in: ${out//$'\n'/ }"
+  elif [[ $out == *": not found" ]]; then
+    return 0
+  else
+    die "cannot tell whether $1:latest exists: ${out//$'\n'/ }"
+  fi
+}
+
+version_line() {
+  [ $# -eq 1 ] || usage
+  local file=$1 content re=${LINE_RE%'$'}$'\n?$' # LINE_RE, and a final newline allowed
+  { [ -f "$file" ] && [ -r "$file" ]; } || die "cannot read $file"
+  content=$(cat -- "$file"; echo .) # the dot keeps a final newline, which $(...) would drop
+  content=${content%.}
+  # The byte count catches what $(...) drops silently: NUL bytes.
+  if [[ ! $content =~ $re ]] || [ "$(wc -c < "$file")" -ne "${#content}" ]; then
+    die "$file must hold the release line MAJOR.MINOR (two numbers without leading zeros, e.g. 0.1) as its only" \
+      "line, not $(printf '%q' "$content")"
+  fi
+  echo "${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+}
+
+tag_versions() { # TAGS_FILE: the version X.Y.Z of each git tag vX.Y.Z in it, one per line; other lines are ignored
+  { [ -f "$1" ] && [ -r "$1" ]; } || die "cannot read $1"
+  sed -n 's/^v//p' "$1" | LC_ALL=C grep -E "$VERSION_RE" || true
+}
+
+highest_patch() { # LINE VERSION...: the highest PATCH among the VERSIONs on LINE (others than X.Y.Z are ignored),
+                  # nothing when none is; fails when one is on a higher MAJOR.MINOR than LINE
+  local line=$1 v best=
+  shift
+  for v in "$@"; do
+    [[ $v =~ $VERSION_RE ]] || continue
+    local major=${BASH_REMATCH[1]} minor=${BASH_REMATCH[2]} patch=${BASH_REMATCH[3]}
+    { [ ${#major} -le 9 ] && [ ${#minor} -le 9 ] && [ ${#patch} -le 9 ]; } || die "$v: version number too large"
+    if (( major > ${line%.*} || (major == ${line%.*} && minor > ${line#*.}) )); then
+      die "the VERSION line $line is lower than the released version $v (the line never goes back)"
+    fi
+    if [ "$major.$minor" = "$line" ] && { [ -z "$best" ] || [ "$patch" -gt "$best" ]; }; then
+      best=$patch
+    fi
+  done
+  echo "$best"
 }
 
 decide() {
   [ $# -ge 5 ] || usage
-  local key=$1 weekday=$2 force_publish=$3 force_skip_check=$4 publish=false repo current created created_s age_days
-  local now=${PUBLISH_DECIDE_NOW:-$(date -u +%s)}
+  local key=$1 line=$2 tags=$3 force_publish=$4 publish=false has_tag=false all_on_line=true repo current version out
+  local tagged=() latest_versions=()
   shift 4
-  [[ $weekday =~ ^[1-7]$ ]] || die "WEEKDAY must be 1-7, got '$weekday'"
-  [[ $force_publish =~ ^(true|false)$ && $force_skip_check =~ ^(true|false)$ ]] \
-    || die "FORCE_PUBLISH and FORCE_SKIP_CHECK must be true or false"
-  [[ $now =~ ^[0-9]+$ ]] || die "PUBLISH_DECIDE_NOW must be seconds since the epoch, got '$now'"
+  [[ $line =~ $LINE_RE ]] || die "LINE must be MAJOR.MINOR, got '$line'"
+  [[ $force_publish =~ ^(true|false)$ ]] || die "FORCE_PUBLISH must be true or false"
+  out=$(tag_versions "$tags") || exit 1
+  [ -z "$out" ] || mapfile -t tagged <<<"$out"
   for repo in "$@"; do
-    current='' created=''
-    read -r current created <<<"$(latest_info "$repo")" || true
+    current='' version=''
+    read -r current version <<<"$(latest_info "$repo")" || true
     [ "$current" != - ] || current=''
+    [ "$version" != - ] || version=''
     if [ "$current" = "$key" ]; then
       echo "unchanged: $repo:latest has this build's key $key" >&2
     else
       publish=true
       echo "changed: $repo:latest has build key '${current:-none}', this build $key" >&2
     fi
-    if [ -n "$created" ]; then
-      if [ "$created" != - ] && created_s=$(date -u -d "$created" +%s 2>/dev/null); then
-        age_days=$(( (now - created_s) / 86400 ))
-        if [ "$age_days" -gt 6 ]; then
-          publish=true
-          echo "overdue: $repo:latest was created $age_days days ago (a weekly publish was missed)" >&2
-        fi
-      else
-        publish=true
-        echo "overdue: $repo:latest has no readable creation date ('$created')" >&2
-      fi
-    fi
+    latest_versions+=("$version")
+    [[ $version =~ $VERSION_RE && ${version%.*} == "$line" ]] || all_on_line=false
   done
-  if [ "$weekday" = 1 ]; then
-    if [ "$force_skip_check" = true ]; then
-      echo "Monday, but force_skip_check: no weekly publish" >&2
-    else
-      publish=true
-      echo "Monday: weekly publish" >&2
-    fi
+  highest_patch "$line" "${tagged[@]}" "${latest_versions[@]}" >/dev/null # fails when LINE went back
+  for version in "${tagged[@]}"; do
+    [ "${version%.*}" != "$line" ] || has_tag=true
+  done
+  if [ "$has_tag" = true ]; then
+    echo "released: line $line has a git tag" >&2
+  elif [ "$all_on_line" = true ]; then
+    echo "released: every :latest is on line $line, its git tag is missing (re-run the release job)" >&2
+  else
+    publish=true
+    echo "new line: $line has no release yet" >&2
   fi
   if [ "$force_publish" = true ]; then
     publish=true
     echo "force_publish" >&2
   fi
   echo "$publish"
+}
+
+next_version() {
+  [ $# -ge 3 ] || usage
+  local line=$1 tags=$2 repo version best n first got taken out
+  local tagged=() latest_versions=()
+  shift 2
+  [[ $line =~ $LINE_RE ]] || die "LINE must be MAJOR.MINOR, got '$line'"
+  out=$(tag_versions "$tags") || exit 1
+  [ -z "$out" ] || mapfile -t tagged <<<"$out"
+  for repo in "$@"; do
+    version=$(latest_version "$repo") || exit 1 # the registry could not tell: never guess
+    latest_versions+=("$version")
+  done
+  best=$(highest_patch "$line" "${tagged[@]}" "${latest_versions[@]}") || exit 1
+  echo "highest released patch of $line (git tags, :latest labels): ${best:-none}" >&2
+  first=$(( ${best:--1} + 1 ))
+  for (( n = first; n < first + 100; n++ )); do
+    taken=false
+    for repo in "$@"; do
+      got=$(digest_of "$repo:$line.$n") || exit 1 # the registry could not tell: never guess
+      if [ -n "$got" ]; then
+        taken=true
+        echo "taken: $repo:$line.$n ($got)" >&2
+      fi
+    done
+    if [ "$taken" = false ]; then
+      echo "$line.$n"
+      return 0
+    fi
+  done
+  die "no free version from $line.$first to $line.$((first + 99))"
+}
+
+in_list() { # VALUE ITEM...: VALUE is one of the ITEMs
+  local value=$1 item
+  shift
+  for item in "$@"; do
+    if [ "$item" = "$value" ]; then return 0; fi
+  done
+  return 1
+}
+
+released() {
+  [ $# -ge 2 ] || usage
+  local tags=$1 repo version out every v
+  local tagged=() missing=() versions=()
+  shift
+  out=$(tag_versions "$tags") || exit 1
+  [ -z "$out" ] || mapfile -t tagged <<<"$out"
+  for repo in "$@"; do
+    version=$(latest_version "$repo") || exit 1 # the registry could not tell: never guess
+    versions+=("$version")
+    if [[ ! $version =~ $VERSION_RE ]]; then
+      echo "not checked: $repo:latest has no MAJOR.MINOR.PATCH version label ('$version')" >&2
+    elif in_list "$version" "${tagged[@]}"; then
+      echo "released: $repo:latest is $version, which has its git tag v$version" >&2
+    elif ! in_list "$version" "${missing[@]}"; then
+      missing+=("$version")
+    fi
+  done
+  for version in "${missing[@]}"; do
+    every=true
+    for v in "${versions[@]}"; do
+      [ "$v" = "$version" ] || every=false
+    done
+    if [ "$every" = true ]; then
+      echo "publish_tested: Release v$version is missing: re-run the failed release job of the run that published it" \
+        "(see docs/maintenance.md)" >&2
+    else
+      echo "publish_tested: Release v$version is missing, and only some :latest images carry it: the publish job of" \
+        "the run that published it stopped between tagging the images, so no release job ran. Re-run that failed" \
+        "publish job, or run build.yml with force_publish (see docs/maintenance.md)" >&2
+    fi
+  done
+  [ ${#missing[@]} -eq 0 ] || exit 1
 }
 
 image_manifest() { # LAYOUT_DIR: digest of the single image manifest in an OCI layout of one image
@@ -218,7 +345,7 @@ tag() {
   [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]] || die "DIGEST must be sha256:<64 hex digits>"
   for t in "$@"; do
     [[ $t =~ $TAG_RE ]] || die "not a valid tag: '$t'"
-    if [ "$t" != latest ]; then
+    if [[ ! $t =~ $MOVABLE_RE ]]; then
       got=$(digest_of "$repo:$t") || exit 1 # the registry could not tell: never guess
       [ -z "$got" ] || [ "$got" = "$digest" ] || die "$repo:$t is published (at $got) and never moves"
     fi
@@ -237,8 +364,10 @@ cmd=$1
 shift
 case "$cmd" in
   identity) [ $# -eq 1 ] || usage; identity "$1" ;;
+  line) version_line "$@" ;;
   decide) decide "$@" ;;
-  release-tag) release_tag "$@" ;;
+  next-version) next_version "$@" ;;
+  released) released "$@" ;;
   push) push "$@" ;;
   check) check "$@" ;;
   tag) tag "$@" ;;

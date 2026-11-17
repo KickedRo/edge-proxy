@@ -40,5 +40,18 @@ A record of how this repository is protected, and what is still to do. It is not
 
 ## Still to do
 
-- Nothing is open at the time of writing. If a package turns private again (it is a package setting on GitHub, not
-  a repository one), pulling needs a login: see "A private copy" in [verify.md](verify.md).
+Two settings for versioned releases (see [maintenance.md](maintenance.md#versions)). They are maintainer actions,
+made by hand in the repository's settings on GitHub. Switch both on **before the first release** (`0.1.0`, which the
+first push run on `main` with versioned releases publishes): release immutability applies only to Releases published
+after it is switched on, and the ruleset then protects `v0.1.0` from the moment it is created.
+
+- **A tag ruleset for `v*`** (repository Settings → Rules → Rulesets; a ruleset that targets the tags `v*`): restrict
+  deletions and restrict updates, with no bypass. A version tag then never moves and never disappears. Do not
+  restrict creations: the release job creates each tag `vX.Y.Z` with the workflow's token when it publishes the
+  Release.
+- **Release immutability** (repository Settings → General → Releases → "Enable release immutability"): once a Release
+  is published, its tag and assets cannot be changed or deleted. The release job creates a draft, uploads
+  `manifest.json` and only then publishes, so it works with the setting on or off.
+
+If a package turns private again (it is a package setting on GitHub, not a repository one), pulling needs a login: see
+"A private copy" in [verify.md](verify.md).

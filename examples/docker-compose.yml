@@ -6,8 +6,9 @@
 # if you do not run rootful Docker. Then: docker compose up -d
 # Every service has "restart: unless-stopped", so the front door comes back after a reboot or a Docker restart.
 #
-# The images below are referenced by :latest to keep the example short. For a real deployment, verify an image (see
-# docs/verify.md) and pin it by digest: image: ghcr.io/kickedro/edge-proxy@sha256:<digest>
+# The images below are referenced by :latest to keep the example short. For a real deployment, pick a version on the
+# Releases page, verify both images (see docs/verify.md) and pin them by version and digest, the same version for
+# both: image: ghcr.io/kickedro/edge-proxy:0.1.0@sha256:<digest> (and edge-proxy-gen:0.1.0@sha256:<digest>)
 
 volumes:
   nginx_conf:

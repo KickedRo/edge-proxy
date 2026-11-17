@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/KickedRo/edge-proxy/security/advisories/new
+    about: Report it privately through GitHub's private vulnerability reporting, never in a public issue. See SECURITY.md.
+  - name: Configuration guide
+    url: https://github.com/KickedRo/edge-proxy/blob/main/docs/configuration.md
+    about: What the WAF lets through, exclusions, logs, the block page, migrating from nginx-proxy.
