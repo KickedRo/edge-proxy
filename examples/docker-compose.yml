@@ -32,6 +32,8 @@ services:
     ports:
       - "80:80"
       - "443:443"
+      # HTTP/3 (QUIC) runs over UDP; uncomment, and turn it on per site, see docs/configuration.md#http3.
+      # - "443:443/udp"
     environment:
       # Every setting has a secure default, see docs/settings.md. Uncomment to change, then check the log for
       # SECURITY: lines. DetectionOnly logs attacks without blocking them: useful for a first period on a new site.

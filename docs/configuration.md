@@ -14,7 +14,7 @@ Contents: [Mount points](#mount-points-for-your-own-rules-and-config) ·
 [Log files on the host](#log-files-on-the-host) · [Audit log](#audit-log) · [Block page](#block-page) ·
 [Headers](#security-headers-and-hidden-backend-headers) · [Proxy-wide files](#proxy-wide-files-in-confd) ·
 [A replaced nginx.conf](#a-replaced-nginxconf) · [Migrating](#migrating-from-an-existing-nginx-proxy-setup) ·
-[Read-only filesystem](#read-only-root-filesystem) · [The gen image](#the-gen-image)
+[HTTP/3](#http3) · [Read-only filesystem](#read-only-root-filesystem) · [The gen image](#the-gen-image)
 
 ## Mount points for your own rules and config
 
@@ -32,7 +32,7 @@ settings, the CRS setup, the settings from the environment variables, the [ACME 
 the plugins' `*-config.conf` and `*-before.conf`, `custom.d`, the CRS rules, the plugins' `*-after.conf`, the status
 setting that needs the rules, `after.d`.
 
-Use rule IDs from 10100 to 99999 for your own rules (10001 is the image's ACME exemption; the CRS uses 900000 and up).
+Use rule IDs from 10100 to 99999 for your own rules (10001 and 10002 are the image's own rules, the ACME exemption and the HTTP/3 one; the CRS uses 900000 and up).
 Do not reuse the CRS setup IDs the image sets itself (900000, 900110, 900200, 900220, 900250): libmodsecurity accepts
 the duplicate without a message, so the mistake goes unnoticed. To change what they set, use the `MODSEC_*` setting, or
 a `setvar` rule with an ID of your own (as in the examples below).
@@ -281,6 +281,26 @@ Replace the images and keep your `VIRTUAL_HOST` backends. What differs:
 
 Your `vhost.d` and `vhost.d/<host>_location` snippets, `htpasswd`, certificates and per-container variables work as
 before, because the template is nginx-proxy's own.
+
+## HTTP/3
+
+`edge`'s nginx is built with HTTP/3. Turn it on per site with the label
+`com.github.nginx-proxy.nginx-proxy.http3.enable=true` on the backend container, or for every site with
+`ENABLE_HTTP3=true` on the **gen** container, and publish UDP port 443 on edge (`- "443:443/udp"`; the example
+compose file has it commented). Browsers learn about it from the `alt-svc` header sent over HTTP/2.
+
+The WAF inspects HTTP/3 requests like the others: the smoke test sends an attack in the URL, in a header and in a
+POST body (also streamed without `Content-Length`) over HTTP/3, and each is blocked with a CRS match in the audit log.
+
+One rule differs for HTTP/3. The authority of an HTTP/3 request is in the `:authority` pseudo-header, which nginx does
+not hand to the ModSecurity connector, so ModSecurity sees no `Host` header and CRS rule 920280 ("Request Missing a
+Host Header") would refuse every HTTP/3 request. The image therefore skips rule 920280 **for HTTP/3 requests only**
+(its rule 10002, in `01-http3-host.conf`); HTTP/1.x and HTTP/2 are unchanged. The cost: over HTTP/3, CRS checks that
+read the Host header see none. This is the workaround from
+[ModSecurity-nginx issue 305](https://github.com/owasp-modsecurity/ModSecurity-nginx/issues/305); the fix is
+[pull request 364](https://github.com/owasp-modsecurity/ModSecurity-nginx/pull/364), which the image does not carry
+yet. The rule will be removed when the connector ships the fix. To keep 920280 active for HTTP/3 anyway (which blocks
+HTTP/3), put `SecRuleRemoveById 10002` in a file in `custom.d`.
 
 ## Read-only root filesystem
 

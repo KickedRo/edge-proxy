@@ -15,12 +15,18 @@ changed, on the [Releases page](https://github.com/KickedRo/edge-proxy/releases)
 
 ### Added
 
+- HTTP/3 in the split-layout smoke test (`tests/split_smoke.sh`): a site with the HTTP/3 label answers over HTTP/3,
+  sends `alt-svc` over HTTP/2, and attacks in the URL, a header, a form body and a body streamed without
+  `Content-Length` are blocked by the CRS over HTTP/3; rule 920280 still applies to other protocols. Documented in the
+  configuration guide, with the UDP port in the example compose file.
 - A smoke test for long-lived connections through the WAF (`tests/streaming_smoke.sh`): WebSocket echo across a 20 s
   idle period, server-sent events and streamed HTML arriving as they are produced, a 25 s long poll, and attacks on the
   same routes still blocked.
 
 ### Fixed
 
+- HTTP/3 requests were refused by the WAF: the connector hands ModSecurity no Host header for them, so CRS rule 920280
+  matched every request. The image now skips that rule for HTTP/3 requests only (rule 10002).
 - With a host folder mounted at `/var/log/nginx`, errors logged at http level (for example by nginx-proxy's template)
   reach `error.log` from the first start, not only after the first reload.
 

@@ -91,3 +91,14 @@ services:
     networks: [proxy]
     environment:
       VIRTUAL_HOST: broken.example.com
+
+  # HTTP/3 is switched on for this vhost only, with nginx-proxy's own label (gen's ENABLE_HTTP3 would switch it on for
+  # all vhosts). The test reaches it over UDP from a client container on the proxy network.
+  h3:
+    image: ${BACKEND_IMAGE:?}
+    container_name: ${RUN:?}-h3
+    networks: [proxy]
+    environment:
+      VIRTUAL_HOST: h3.example.com
+    labels:
+      com.github.nginx-proxy.nginx-proxy.http3.enable: "true"
