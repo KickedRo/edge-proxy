@@ -296,7 +296,9 @@ One rule differs for HTTP/3. The authority of an HTTP/3 request is in the `:auth
 not hand to the ModSecurity connector, so ModSecurity sees no `Host` header and CRS rule 920280 ("Request Missing a
 Host Header") would refuse every HTTP/3 request. The image therefore skips rule 920280 **for HTTP/3 requests only**
 (its rule 10002, in `01-http3-host.conf`); HTTP/1.x and HTTP/2 are unchanged. The cost: over HTTP/3, CRS checks that
-read the Host header see none. This is the workaround from
+read the Host header see none, and so do your own rules and exclusions keyed on the Host header (the examples above
+use `REQUEST_HEADERS:Host`): they do not match HTTP/3 requests until the connector fix ships, so a site that needs
+such an exclusion should leave HTTP/3 off. This is the workaround from
 [ModSecurity-nginx issue 305](https://github.com/owasp-modsecurity/ModSecurity-nginx/issues/305); the fix is
 [pull request 364](https://github.com/owasp-modsecurity/ModSecurity-nginx/pull/364), which the image does not carry
 yet. The rule will be removed when the connector ships the fix. To keep 920280 active for HTTP/3 anyway (which blocks

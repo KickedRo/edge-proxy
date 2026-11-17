@@ -287,10 +287,19 @@ wait_until 10 h3_header_attack_blocked audit_rule t=h3_hdr 932
 expect_eq h3_body_attack_blocked "$(h3_status --data "q=$H3_XSS" "https://h3.example.com/?t=h3_body")" 403
 wait_until 10 h3_body_attack_blocked audit_rule t=h3_body 941
 
-# No Content-Length: the body is read from stdin, so curl sends it as it comes. The WAF must still inspect it.
-STREAMED=$(echo "q=$H3_XSS" | h3 -o /dev/null -w '%{http_code}' --data-binary @- "https://h3.example.com/?t=h3_stream")
+# No Content-Length: -T - uploads stdin of unknown size, which curl sends as a stream (--data-binary @- reads it all and
+# sends a length). The WAF must still inspect it; the audit entry must show the request really had no length.
+STREAMED=$(echo "q=$H3_XSS" | h3 -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/x-www-form-urlencoded' \
+  -T - "https://h3.example.com/?t=h3_stream")
 expect_eq h3_streamed_body_attack_blocked "$STREAMED" 403
 wait_until 10 h3_streamed_body_attack_blocked audit_rule t=h3_stream 941
+audit_without_length() { # marker -> true when the audit entry for that request has no Content-Length header
+  docker logs "$RUN-edge" 2>/dev/null | grep '^{"transaction"' \
+    | jq -e --arg m "$1" 'select((.transaction.request.uri // "") | contains($m))
+        | select([.transaction.request.headers | keys[] | ascii_downcase] | index("content-length") | not)' >/dev/null 2>&1
+}
+wait_until 10 h3_streamed_body_has_no_content_length audit_without_length t=h3_stream
+pass h3_streamed_body_has_no_content_length
 
 expect_eq h3_legit_post "$(h3_status --data 'name=alice' https://h3.example.com/)" 200
 
