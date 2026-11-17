@@ -13,7 +13,7 @@ changed, on the [Releases page](https://github.com/KickedRo/edge-proxy/releases)
 
 ## [Unreleased]
 
-## [0.1.0] - 2026-11-16
+## [0.1.0] - 2026-11-17
 
 > **Upgrading:** images published before 0.1.0 have date-based tags (for example
 > `1.31.8-modsec3.0.17-crs4.30.0-20261116`). Those tags stay where they are, but no new ones are made. If you pinned
