@@ -13,6 +13,11 @@ changed, on the [Releases page](https://github.com/KickedRo/edge-proxy/releases)
 
 ## [Unreleased]
 
+### Fixed
+
+- With a host folder mounted at `/var/log/nginx`, errors logged at http level (for example by nginx-proxy's template)
+  reach `error.log` from the first start, not only after the first reload.
+
 ## [0.1.0] - 2026-11-17
 
 > **Upgrading:** images published before 0.1.0 have date-based tags (for example

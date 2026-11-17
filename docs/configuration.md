@@ -11,7 +11,7 @@ their defaults and what you lose by weakening them, see the **[settings table](s
 
 Contents: [Mount points](#mount-points-for-your-own-rules-and-config) ·
 [ACME exemption](#the-acme-challenge-exemption) · [What the WAF lets through](#what-the-waf-lets-through-by-default) ·
-[Audit log](#audit-log) · [Block page](#block-page) ·
+[Log files on the host](#log-files-on-the-host) · [Audit log](#audit-log) · [Block page](#block-page) ·
 [Headers](#security-headers-and-hidden-backend-headers) · [Proxy-wide files](#proxy-wide-files-in-confd) ·
 [A replaced nginx.conf](#a-replaced-nginxconf) · [Migrating](#migrating-from-an-existing-nginx-proxy-setup) ·
 [Read-only filesystem](#read-only-root-filesystem) · [The gen image](#the-gen-image)
@@ -168,6 +168,12 @@ you have reviewed, and mount the files of its `plugins/` directory at `/etc/ngin
 fine). They are loaded in the CRS's order: every `*-config.conf`, then every `*-before.conf` before the CRS rules, and
 every `*-after.conf` after them. Read the plugin's README: some need a setting in their `*-config.conf`, and some
 apply to every host unless you narrow them.
+
+## Log files on the host
+
+With a host folder mounted at `/var/log/nginx`, nginx's own errors, including those of nginx-proxy's template at http
+level (such as `access forbidden by rule`), go to `error.log` there from the first start; without the mount they stay
+in `docker logs`. The audit log stays on stdout unless `MODSEC_AUDIT_LOG` says otherwise.
 
 ## Audit log
 
