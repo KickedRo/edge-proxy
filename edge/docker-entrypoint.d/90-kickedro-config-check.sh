@@ -14,7 +14,8 @@
 #    file and line and the setting that is no longer applied: NOTICE when the file's value is as strict as the
 #    setting's default, SECURITY when it is weaker or cannot be compared (the rules of settings.tsv, from
 #    settings-lib.sh, as at the settings check). Any other failure is left alone: nginx then refuses to start with its
-#    own message, as without this script. Only the image's rendered files are changed, never conf.d.
+#    own message, as without this script (with a mounted log folder that message is also printed here, see
+#    leave_to_nginx). Only the image's rendered files are changed, never conf.d.
 # 2. The image's includes. A replaced /etc/nginx/nginx.conf that does not include the WAF (modsecurity-http.conf) or
 #    the hardening (hardening.conf) runs without them: that prints a SECURITY line, and nginx still starts.
 #
@@ -115,6 +116,16 @@ EOF
     fi
 }
 
+leave_to_nginx() { # nginx -T failed for a reason this script does not handle: nginx refuses to start with its own error
+    # With a mounted log folder (error.log is not the image's symlink to stderr) the entrypoint sends nginx's stderr to
+    # error.log, so that error would be only there and "docker logs" would not say why edge stopped: print it here,
+    # before the redirect. With the symlink nginx prints it to the container output itself.
+    if [ ! -L /var/log/nginx/error.log ]; then
+        printf '%s\n' "$out" | grep -E '^nginx: \[(emerg|alert|crit)\]' >&2 || true
+    fi
+    exit 0
+}
+
 # 1. Give way to proxy-wide files, one directive per round; the first round nginx accepts ends the loop. The lines are
 # printed only then: when nginx refuses the configuration anyway, its own error is the message.
 rounds=0
@@ -124,13 +135,13 @@ until out=$(nginx -T 2>&1); do
     duplicate=$(printf '%s\n' "$out" | sed -n \
         's|^nginx: \[emerg\] "\([a-z_]*\)" directive is duplicate in \(/etc/nginx/conf\.d/.*\):\([0-9][0-9]*\)$|\1 \3 \2|p' \
         | head -n 1)
-    [ -n "$duplicate" ] || exit 0 # another error: nginx reports it when it starts
+    [ -n "$duplicate" ] || leave_to_nginx # another error: nginx reports it when it starts
     directive=${duplicate%% *}
     place=${duplicate#* }
     line=${place%% *}
     file=${place#* }
-    setting_of "$directive" >/dev/null || exit 0 # not set by the image
-    give_way "$directive" || exit 0              # no longer set by the image: two conf.d files set it
+    setting_of "$directive" >/dev/null || leave_to_nginx # not set by the image
+    give_way "$directive" || leave_to_nginx              # no longer set by the image: two conf.d files set it
     messages="$messages$(report "$file" "$line" "$directive")
 "
     rounds=$((rounds + 1))

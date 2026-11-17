@@ -178,7 +178,8 @@ COPY --chmod=755 docker-entrypoint.d/ /docker-entrypoint.d/
 # until the first reload. The official entrypoint runs the .envsh scripts in a subshell, so only its own process can
 # redirect stderr for the final "exec nginx": one guarded line is inserted before that exec. When error.log is the
 # image's default symlink nothing changes. Start-up lines (SECURITY:, NOTICE:) are printed earlier and stay in the
-# container output; "docker exec ... nginx -t" and "-s reload" do not go through the entrypoint and are unaffected.
+# container output, and so does nginx's error when the start-up check (90-kickedro-config-check.sh) sees nginx refuse
+# the configuration; "docker exec ... nginx -t" and "-s reload" do not go through the entrypoint and are unaffected.
 # The build fails if the official entrypoint no longer has exactly one final exec line or the result is not valid
 # shell, so a base-image change cannot silently drop the fix.
 RUN set -eu; \

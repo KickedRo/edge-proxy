@@ -517,8 +517,8 @@ fi
 
 # ---- 4. http-level errors with a mounted /var/log/nginx --------------------------------------------
 # nginx-proxy's template has "error_log /dev/stderr;" at http level. nginx opens that while reading the
-# configuration, before it points fd 2 at the main-level error.log, so without 95-kickedro-error-log.envsh the
-# errors went to the container output until the first reload.
+# configuration, before it points fd 2 at the main-level error.log, so without the entrypoint's redirect (edge/Dockerfile)
+# the errors went to the container output until the first reload.
 mkdir -p "$WORK/logs" "$WORK/conf-errlog.d"
 chmod 755 "$WORK/logs"
 cat > "$WORK/conf-errlog.d/test.conf" <<'CONF'
@@ -556,5 +556,33 @@ for _ in $(seq 1 50); do
 done
 [ -n "$FOUND" ] && pass error_log_default_still_in_container_output \
   || fail error_log_default_still_in_container_output "no 'access forbidden' line in docker logs"
+
+# Why nginx refuses to start must be in "docker logs" also with a mounted log folder, the first place anyone looks: the
+# redirect sends nginx's own [emerg] to error.log only, so the start-up check prints it before that.
+wait_exited() { # container -> waits up to 30 s for it to stop
+  for _ in $(seq 1 150); do
+    [ "$(docker inspect -f '{{.State.Status}}' "$1" 2>/dev/null)" = exited ] && return 0
+    sleep 0.2
+  done
+  docker logs "$1" >&2 || true
+  fail "wait_exited $1" "still running after 30 s"
+}
+BAD_EMERG='nginx: [emerg] unknown directive "bogus_directive" in /etc/nginx/conf.d/bad.conf:3'
+mkdir -p "$WORK/conf-bad.d" "$WORK/logs-bad"
+chmod 755 "$WORK/logs-bad"
+printf 'server {\n    listen 80;\n    bogus_directive on;\n}\n' > "$WORK/conf-bad.d/bad.conf"
+start "$RUN-badconf" "$NET" -v "$WORK/conf-bad.d:/etc/nginx/conf.d:ro" -v "$WORK/logs-bad:/var/log/nginx" "$IMAGE"
+wait_exited "$RUN-badconf"
+grep -qF "$BAD_EMERG" "$WORK/logs-bad/error.log" 2>/dev/null && pass start_error_mounted_in_error_log \
+  || fail start_error_mounted_in_error_log "no '$BAD_EMERG' in the mounted error.log"
+LOGS=$(docker logs "$RUN-badconf" 2>&1) || fail start_error_mounted_in_container_output "cannot read docker logs"
+grep -qF "$BAD_EMERG" <<<"$LOGS" && pass start_error_mounted_in_container_output \
+  || fail start_error_mounted_in_container_output "no '$BAD_EMERG' in docker logs: $(tail -5 <<<"$LOGS")"
+# Without the mount, nginx itself writes it to the container output, as before.
+start "$RUN-badconf2" "$NET" -v "$WORK/conf-bad.d:/etc/nginx/conf.d:ro" "$IMAGE"
+wait_exited "$RUN-badconf2"
+LOGS=$(docker logs "$RUN-badconf2" 2>&1) || fail start_error_default_in_container_output "cannot read docker logs"
+grep -qF "$BAD_EMERG" <<<"$LOGS" && pass start_error_default_in_container_output \
+  || fail start_error_default_in_container_output "no '$BAD_EMERG' in docker logs: $(tail -5 <<<"$LOGS")"
 
 echo "ALL PASS"

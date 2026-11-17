@@ -173,7 +173,10 @@ apply to every host unless you narrow them.
 
 With a host folder mounted at `/var/log/nginx`, nginx's own errors, including those of nginx-proxy's template at http
 level (such as `access forbidden by rule`), go to `error.log` there from the first start; without the mount they stay
-in `docker logs`. The audit log stays on stdout unless `MODSEC_AUDIT_LOG` says otherwise.
+in `docker logs`. The audit log stays on stdout unless `MODSEC_AUDIT_LOG` says otherwise. When nginx refuses its
+configuration at start, the image's start-up check (`nginx -T`) also prints nginx's error to `docker logs`; a failure
+that check does not reproduce, such as a port nginx cannot bind or a `default.conf` that `gen` was rewriting at that
+moment ([the gen image](#the-gen-image)), is only in `error.log` there.
 
 ## Audit log
 
