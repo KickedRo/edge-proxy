@@ -28,9 +28,12 @@ export RUN STREAM_IMAGE BACKEND_IMAGE HEADERS_BACKEND_IMAGE EDGE_IMAGE=$EDGE GEN
 # Only the named services are started (see "up" below), so services other tests add to compose.smoke.yml stay out.
 compose() { docker compose -p "$RUN" --profile '*' -f "$HERE/compose.smoke.yml" -f "$HERE/compose.streaming.yml" "$@"; }
 cleanup() {
+  # The WebSocket client first: a client still running (killed docker CLI, CI cancel) keeps the network in use, and
+  # 'compose down' could not remove it.
+  docker rm -f -v "$RUN-ws" >/dev/null 2>&1 || true
   compose down -v --remove-orphans --timeout 5 >/dev/null 2>&1 || true
-  # Anything compose could not remove (a failed 'up' before the project existed), and the WebSocket client containers.
-  docker rm -f -v "$RUN-edge" "$RUN-gen" "$RUN-stream" "$RUN-ws" >/dev/null 2>&1 || true
+  # Anything compose could not remove (a failed 'up' before the project existed).
+  docker rm -f -v "$RUN-edge" "$RUN-gen" "$RUN-stream" >/dev/null 2>&1 || true
   rm -rf "$WORK"
 }
 trap cleanup EXIT
