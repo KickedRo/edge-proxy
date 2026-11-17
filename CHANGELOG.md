@@ -13,6 +13,12 @@ changed, on the [Releases page](https://github.com/KickedRo/edge-proxy/releases)
 
 ## [Unreleased]
 
+### Added
+
+- A smoke test for long-lived connections through the WAF (`tests/streaming_smoke.sh`): WebSocket echo across a 20 s
+  idle period, server-sent events and streamed HTML arriving as they are produced, a 25 s long poll, and attacks on the
+  same routes still blocked.
+
 ### Fixed
 
 - With a host folder mounted at `/var/log/nginx`, errors logged at http level (for example by nginx-proxy's template)

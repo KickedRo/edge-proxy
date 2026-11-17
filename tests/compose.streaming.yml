@@ -1,0 +1,14 @@
+# Override for tests/streaming_smoke.sh, used together with compose.smoke.yml (same variables, plus STREAM_IMAGE):
+#   docker compose -f compose.smoke.yml -f compose.streaming.yml ...
+# Adds a backend that streams: WebSocket echo, server-sent events, a 25 s long poll and chunked HTML.
+services:
+  stream:
+    image: ${STREAM_IMAGE:?}
+    container_name: ${RUN:?}-stream
+    networks: [proxy]
+    command: ["python3", "/f/stream_backend.py", "--port", "8000"]
+    environment:
+      VIRTUAL_HOST: stream.example.com
+      VIRTUAL_PORT: "8000"
+    volumes:
+      - ./fixtures:/f:ro

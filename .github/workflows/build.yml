@@ -171,6 +171,8 @@ jobs:
         run: tests/edge_smoke.sh edge-proxy:ci
       - name: Smoke test edge with gen (split layout)
         run: tests/split_smoke.sh edge-proxy:ci edge-proxy-gen:ci
+      - name: Long-lived connections smoke test
+        run: tests/streaming_smoke.sh edge-proxy:ci edge-proxy-gen:ci
       - name: Hardening smoke test
         run: tests/hardening_smoke.sh edge-proxy:ci
 
