@@ -355,3 +355,10 @@ variable holds it; it is printed at start). Use it like nginx-proxy's `dockergen
   for. This combination is **not exercised by the smoke tests**; [`examples/docker-compose.yml`](../examples/docker-compose.yml)
   follows acme-companion's documentation for the layout. Its HTTP-01 requests fit the
   [ACME exemption](#the-acme-challenge-exemption).
+
+Give `edge` a restart policy (the example has `restart: unless-stopped`). `gen` (docker-gen 0.14.6 and later) rewrites
+`default.conf` in place, and it rewrites it when `edge` starts, because the template takes its networks from the
+`edge` container. An `edge` that starts while `gen` writes can read a half-written file and stop with an `[emerg]` such
+as `unexpected end of file`. With a restart policy Docker starts it again a moment later and it reads the whole file;
+without one it stays down until you start it again. Reloads are not affected: `gen` signals `edge` only after it has
+written the file, and nginx keeps its running configuration when a reload fails.

@@ -17,6 +17,11 @@ services:
   nginx-proxy:
     image: ${EDGE_IMAGE:?}
     container_name: ${RUN:?}-edge
+    # As real deployments run it (the example has unless-stopped). gen rewrites default.conf in place when edge appears,
+    # and an edge that starts during that write can read a half-written file and exit; the next start reads the whole
+    # file. Three tries, so a configuration that never works still fails the test. The scripts print a NOTICE line
+    # when edge was restarted.
+    restart: on-failure:3
     networks: [proxy]
     ports:
       - "127.0.0.1:${HTTP_PORT:-}:80"

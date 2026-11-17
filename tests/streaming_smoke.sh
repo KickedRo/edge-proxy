@@ -27,7 +27,18 @@ BACKEND_IMAGE=$STREAM_IMAGE HEADERS_BACKEND_IMAGE=$STREAM_IMAGE
 export RUN STREAM_IMAGE BACKEND_IMAGE HEADERS_BACKEND_IMAGE EDGE_IMAGE=$EDGE GEN_IMAGE=$GEN HTTP_PORT=${PORT_1:-} HTTPS_PORT=${PORT_2:-}
 # Only the named services are started (see "up" below), so services other tests add to compose.smoke.yml stay out.
 compose() { docker compose -p "$RUN" --profile '*' -f "$HERE/compose.smoke.yml" -f "$HERE/compose.streaming.yml" "$@"; }
+notice_restarts() { # container -> a NOTICE line when edge's restart policy restarted it (compose.smoke.yml says why), so
+  # a crash the policy hid still shows in the CI log, with nginx's errors from before its last start
+  local info n errors
+  info=$(docker inspect -f '{{.RestartCount}} {{.State.StartedAt}}' "$1" 2>/dev/null) || return 0
+  n=${info%% *}
+  [ "$n" -gt 0 ] 2>/dev/null || return 0
+  errors=$(docker logs --until "${info#* }" "$1" 2>&1 | grep -E '\[(emerg|alert|crit)\]' | tail -5) || true
+  echo "NOTICE: edge restarted $n time(s) at start${errors:+; errors before its last start:}" >&2
+  [ -z "$errors" ] || printf '%s\n' "$errors" >&2
+}
 cleanup() {
+  notice_restarts "$RUN-edge"
   # The WebSocket client first: a client still running (killed docker CLI, CI cancel) keeps the network in use, and
   # 'compose down' could not remove it.
   docker rm -f -v "$RUN-ws" >/dev/null 2>&1 || true

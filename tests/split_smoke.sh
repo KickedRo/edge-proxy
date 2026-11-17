@@ -24,7 +24,18 @@ RUN="splittest-$$-$RANDOM"
 WORK=$(mktemp -d)
 export RUN BACKEND_IMAGE HEADERS_BACKEND_IMAGE EDGE_IMAGE=$EDGE GEN_IMAGE=$GEN HTTP_PORT=${PORT_1:-} HTTPS_PORT=${PORT_2:-}
 compose() { docker compose -p "$RUN" --profile '*' -f "$HERE/compose.smoke.yml" "$@"; }
+notice_restarts() { # container -> a NOTICE line when edge's restart policy restarted it (compose.smoke.yml says why), so
+  # a crash the policy hid still shows in the CI log, with nginx's errors from before its last start
+  local info n errors
+  info=$(docker inspect -f '{{.RestartCount}} {{.State.StartedAt}}' "$1" 2>/dev/null) || return 0
+  n=${info%% *}
+  [ "$n" -gt 0 ] 2>/dev/null || return 0
+  errors=$(docker logs --until "${info#* }" "$1" 2>&1 | grep -E '\[(emerg|alert|crit)\]' | tail -5) || true
+  echo "NOTICE: edge restarted $n time(s) at start${errors:+; errors before its last start:}" >&2
+  [ -z "$errors" ] || printf '%s\n' "$errors" >&2
+}
 cleanup() {
+  notice_restarts "$RUN-edge"
   compose down -v --remove-orphans --timeout 5 >/dev/null 2>&1 || true
   # Anything compose could not remove (a failed 'up' before the project existed).
   docker rm -f -v "$RUN-edge" "$RUN-gen" "$RUN-whoami" "$RUN-broken" "$RUN-headers" "$RUN-h3" >/dev/null 2>&1 || true
@@ -59,12 +70,18 @@ http_status() { # path [curl args...]
   curl -s -g -o /dev/null -w '%{http_code}' --max-time 10 --resolve "app.example.com:$HTTP_HOST_PORT:127.0.0.1" \
     "$@" "http://app.example.com:$HTTP_HOST_PORT$p" || true
 }
-wait_until() { # seconds name command...
-  local secs=$1 what=$2 i; shift 2
-  for i in $(seq 1 $((secs * 5))); do "$@" >/dev/null 2>&1 && return 0; sleep 0.2; done
-  docker logs "$RUN-gen" 2>&1 | tail -20 >&2 || true
-  docker logs "$RUN-edge" 2>&1 | tail -20 >&2 || true
-  fail "$what" "not true after ${secs}s"
+wait_until() { # seconds name command... -> polls until the command succeeds, by the clock (a probe that is slow itself
+  # does not stretch the limit); on timeout dumps the logs and fails
+  local secs=$1 what=$2 end; shift 2
+  end=$((SECONDS + secs))
+  until "$@" >/dev/null 2>&1; do
+    if [ "$SECONDS" -ge "$end" ]; then
+      docker logs "$RUN-gen" 2>&1 | tail -20 >&2 || true
+      docker logs "$RUN-edge" 2>&1 | tail -20 >&2 || true
+      fail "$what" "not true after ${secs}s"
+    fi
+    sleep 0.2
+  done
 }
 edge_conf_has() { docker exec "$RUN-edge" grep -q -- "$1" /etc/nginx/conf.d/default.conf; }
 edge_conf_lacks() { ! edge_conf_has "$1"; }
@@ -270,7 +287,8 @@ audit_rule() { # marker rule-id-prefix -> true when an audit entry for a request
         | select(all(.transaction.messages[]?; .details.ruleId != "920280"))' >/dev/null 2>&1
 }
 wait_until 30 h3_listening edge_conf_has 'listen 443 quic'
-h3_answers() { [ "$(h3_status https://h3.example.com/)" = 200 ]; }
+# Short tries (curl uses the last --max-time given), so a stalled QUIC handshake still gets several within the wait.
+h3_answers() { [ "$(h3_status --max-time 5 https://h3.example.com/)" = 200 ]; }
 wait_until 30 h3_up h3_answers
 
 expect_eq h3_get "$(h3 -o /dev/null -w '%{http_code} %{http_version}' https://h3.example.com/ </dev/null)" '200 3'

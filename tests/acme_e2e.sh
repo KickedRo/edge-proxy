@@ -28,8 +28,20 @@ export RUN EDGE_IMAGE=$EDGE GEN_IMAGE=$GEN FIXTURES=$HERE/fixtures PEBBLE_CA_FIL
 compose() { docker compose -p "$RUN" -f "$EXAMPLE" -f "$HERE/compose.acme.yml" "$@"; }
 SERVICES=(nginx-proxy nginx-proxy-gen acme-companion whoami pebble)
 VOLUMES=(nginx_conf nginx_vhost nginx_certs nginx_htpasswd nginx_errors nginx_dhparam nginx_html acme_state)
+notice_restarts() { # container -> a NOTICE line when the example's restart policy restarted edge (for example after
+  # reading a default.conf that gen was rewriting, see "The gen image" in docs/configuration.md), so a crash the policy
+  # hid still shows in the CI log, with nginx's errors from before its last start
+  local info n errors
+  info=$(docker inspect -f '{{.RestartCount}} {{.State.StartedAt}}' "$1" 2>/dev/null) || return 0
+  n=${info%% *}
+  [ "$n" -gt 0 ] 2>/dev/null || return 0
+  errors=$(docker logs --until "${info#* }" "$1" 2>&1 | grep -E '\[(emerg|alert|crit)\]' | tail -5) || true
+  echo "NOTICE: edge restarted $n time(s) at start${errors:+; errors before its last start:}" >&2
+  [ -z "$errors" ] || printf '%s\n' "$errors" >&2
+}
 cleanup() {
   local s
+  notice_restarts "$RUN-nginx-proxy"
   # The client first: one still running (killed docker CLI, CI cancel) keeps the network in use.
   docker rm -f -v "$RUN-client" >/dev/null 2>&1 || true
   compose down -v --remove-orphans --timeout 5 >/dev/null 2>&1 || true
@@ -76,10 +88,11 @@ file_serial() { # -> serial of app.example.com.crt in the certs volume (as opens
   volume_run nginx_certs --entrypoint openssl "$GEN" x509 -noout -serial -in /v/app.example.com.crt
 }
 served_serial() { # -> serial of the certificate edge serves for app.example.com, only if it verifies against Pebble's
-  # root (fetched below) and is valid for that name; fails otherwise
+  # root (fetched below) and is valid for that name; fails otherwise. s_client has no time limit of its own, and a
+  # handshake that stalls must not hold wait_until past its deadline.
   # shellcheck disable=SC2016 # the script runs in the client container's shell
   client -v "$WORK/pebble-root.pem:/pebble-root.pem:ro" --entrypoint sh "$GEN" -c '
-    out=$(openssl s_client -connect app.example.com:443 -servername app.example.com -verify_hostname app.example.com \
+    out=$(timeout 15 openssl s_client -connect app.example.com:443 -servername app.example.com -verify_hostname app.example.com \
       -verify_return_error -CAfile /pebble-root.pem </dev/null 2>&1) || { printf "%s\n" "$out" | tail -5 >&2; exit 1; }
     printf "%s\n" "$out" | grep -q "^Verification: OK" || { echo "no Verification: OK" >&2; exit 1; }
     printf "%s\n" "$out" | openssl x509 -noout -serial'
