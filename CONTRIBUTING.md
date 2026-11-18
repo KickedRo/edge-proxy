@@ -21,8 +21,11 @@ how to build and test, and what a pull request needs.
 - **One setting per protection.** Every protection is one environment variable with a secure default, a list of
   allowed values, and a sentence on what you lose by weakening it. Weakening it prints a `SECURITY:` line at start.
   No setting without that.
-- **nginx-proxy's template, unchanged.** The images are a drop-in for nginx-proxy's separate-containers layout.
-  The template is not patched; the image's behaviour comes from the nginx and ModSecurity configuration around it.
+- **nginx-proxy's template, changed as little as possible.** The images are a drop-in for nginx-proxy's
+  separate-containers layout. The image's behaviour comes from the nginx and ModSecurity configuration around the
+  template. The one exception is the `EDGE_HTTP2` and `EDGE_HTTP3` off switches, which only the template can enforce:
+  `gen/patch-template.sh` makes three checked changes to it at build time, and with the switches on the patched
+  template writes exactly what nginx-proxy's writes.
 - **Fresh by default.** The build takes the newest upstream versions within the major versions in `pins.env`, every
   day. Only nginx-proxy's commit is moved by hand, after review.
 - **Nothing site-specific.** No host names, addresses, customer names or exclusions for particular sites. Examples
@@ -67,9 +70,10 @@ The smoke tests start containers and networks of their own and remove everything
 - **Ports.** `tests/split_smoke.sh` and `tests/streaming_smoke.sh` publish two ports on `127.0.0.1`: they take them
   from `PORT_1` and `PORT_2` when they are set, otherwise Docker picks them. `tests/acme_e2e.sh` publishes none.
 - **Network.** `tests/split_smoke.sh` builds its HTTP/3 client from Debian's `curl` package, so it needs Debian's
-  package mirror. `tests/acme_e2e.sh` runs on internal Docker networks, so nothing in it can connect to a real CA.
-  Outside DNS is blocked there too on Docker Engine 26.0 and later (CVE-2024-29018, also fixed in 25.0.5); older
-  engines may still forward DNS queries from internal networks to the host's resolvers.
+  package mirror, and downloads nginx-proxy's `nginx.tmpl` at the pinned commit from `raw.githubusercontent.com`, to
+  compare its output with gen's. `tests/acme_e2e.sh` runs on internal Docker networks, so nothing in it can connect
+  to a real CA. Outside DNS is blocked there too on Docker Engine 26.0 and later (CVE-2024-29018, also fixed in
+  25.0.5); older engines may still forward DNS queries from internal networks to the host's resolvers.
 - **A shared Docker host.** `tests/acme_e2e.sh` refuses to run while any container carries one of acme-companion's
   discovery labels (`com.github.nginx-proxy.nginx`, `com.github.nginx-proxy.docker-gen` and their older
   `com.github.jrcs.letsencrypt_nginx_proxy_companion.*` forms): the acme-companion it starts would signal that

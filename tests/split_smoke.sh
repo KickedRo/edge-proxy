@@ -3,7 +3,9 @@
 # Runs the edge image (nginx + ModSecurity) and the gen image (docker-gen + nginx-proxy's template, with its real
 # default command) the way nginx-proxy's docker-compose-separate-containers.yml does, in front of a tiny echo backend
 # and a plain nginx backend that sends headers of its own. HTTP/3 is tested from a client container on the test network
-# (the per-run image ${RUN}-h3client, built from tests/fixtures/h3-client.Dockerfile, removed on exit).
+# (the per-run image ${RUN}-h3client, built from tests/fixtures/h3-client.Dockerfile, removed on exit). The last section
+# recreates gen with its hard off switches (EDGE_HTTP2, EDGE_HTTP3), and compares its template's output with that of
+# nginx-proxy's template at the pinned commit, which it downloads from GitHub.
 # Prints "PASS <name>" per assertion, stops at the first failure. The compose project, its volumes, containers
 # and every temp file are removed on exit (also on failure). Host ports: 127.0.0.1 only, taken from PORT_1 and
 # PORT_2 when they are set, else picked by Docker.
@@ -23,6 +25,9 @@ command -v curl >/dev/null || { echo "FAIL setup: curl is required on the host" 
 RUN="splittest-$$-$RANDOM"
 WORK=$(mktemp -d)
 export RUN BACKEND_IMAGE HEADERS_BACKEND_IMAGE EDGE_IMAGE=$EDGE GEN_IMAGE=$GEN HTTP_PORT=${PORT_1:-} HTTPS_PORT=${PORT_2:-}
+# gen's switches stay at their default (on), and ENABLE_HTTP3 at the template's, until section 5 sets them, whatever
+# the calling shell has.
+unset EDGE_HTTP2 EDGE_HTTP3 ENABLE_HTTP3
 compose() { docker compose -p "$RUN" --profile '*' -f "$HERE/compose.smoke.yml" "$@"; }
 notice_restarts() { # container -> a NOTICE line when edge's restart policy restarted it (compose.smoke.yml says why), so
   # a crash the policy hid still shows in the CI log, with nginx's errors from before its last start
@@ -113,12 +118,13 @@ expect_waf_block() { # name marker
 }
 
 # ---- 0. the image's own configuration ---------------------------------------------------------------------
-# Entrypoint and default command are those of nginx-proxy's Dockerfile.dockergen at the pinned ref; the test runs them
+# The default command is that of nginx-proxy's Dockerfile.dockergen at the pinned ref. The entrypoint is gen's settings
+# check, which then hands the command to nginx-proxy's entrypoint (/app/docker-entrypoint.sh). The test runs them
 # unchanged (compose sets no command), only NGINX_CONTAINER_LABEL is set per run.
-UPSTREAM_CMD='["/app/docker-entrypoint.sh"] ["docker-gen","-watch","-wait","100ms:500ms","-event-filter","event=connect","-event-filter","event=disconnect","-notify-filter","label=$NGINX_CONTAINER_LABEL","/app/nginx.tmpl","/etc/nginx/conf.d/default.conf"]'
+EXPECTED_CMD='["/app/kickedro-entrypoint.sh"] ["docker-gen","-watch","-wait","100ms:500ms","-event-filter","event=connect","-event-filter","event=disconnect","-notify-filter","label=$NGINX_CONTAINER_LABEL","/app/nginx.tmpl","/etc/nginx/conf.d/default.conf"]'
 ACTUAL=$(docker inspect "$GEN" --format '{{json .Config.Entrypoint}} {{json .Config.Cmd}}' 2>&1) \
   || fail default_command "cannot inspect $GEN: $ACTUAL"
-expect_eq default_command "$ACTUAL" "$UPSTREAM_CMD"
+expect_eq default_command "$ACTUAL" "$EXPECTED_CMD"
 
 PINNED_REF=$(sed -n 's/^NGINX_PROXY_REF=//p' "$HERE/../pins.env")
 [ -n "$PINNED_REF" ] || fail nginx_proxy_ref "NGINX_PROXY_REF not found in pins.env"
@@ -337,5 +343,93 @@ audit_920280() {
         | select(any(.transaction.messages[]?; .details.ruleId == "920280"))' >/dev/null 2>&1
 }
 wait_until 10 host_rule_kept_for_http1 audit_920280
+
+# ---- 5. hard off switches (EDGE_HTTP2, EDGE_HTTP3) --------------------------------------------------------------
+# A value other than on or off stops gen before nginx-proxy's entrypoint runs: the two error lines are all it prints
+# (no Docker socket is needed to see that).
+for setting in EDGE_HTTP2=Off EDGE_HTTP3=maybe; do
+  if OUT=$(docker run --rm --network none -e "$setting" "$GEN" 2>&1); then
+    fail settings_refused "gen started with $setting"
+  fi
+  [ "$OUT" = "ERROR: ${setting%%=*}='${setting#*=}' is not allowed. Allowed: on off."$'\n'"ERROR: invalid settings, not starting." ] \
+    || fail settings_refused "unexpected output for $setting: $OUT"
+done
+pass settings_refused
+
+# With both switches unset, gen's template renders exactly what nginx-proxy's template at the pinned commit renders, for
+# the same containers (docker-gen without a destination writes to stdout). Also with the debug endpoint on: its JSON
+# holds the template's whole config map, so anything the patch kept there would show.
+curl -fsS --retry 3 --retry-all-errors --max-time 30 -o "$WORK/upstream.tmpl" \
+  "https://raw.githubusercontent.com/nginx-proxy/nginx-proxy/$PINNED_REF/nginx.tmpl" \
+  2>"$WORK/curl.err" || fail switch_on_unchanged "cannot download nginx.tmpl at $PINNED_REF: $(cat "$WORK/curl.err")"
+OUT=$(docker cp "$WORK/upstream.tmpl" "$RUN-gen:/tmp/upstream.tmpl" 2>&1) || fail switch_on_unchanged "cannot copy it into gen: $OUT"
+render() { # template-in-gen name [docker-exec-args...] -> $WORK/name.conf, what docker-gen renders from that template
+  # with the switches unset
+  local tmpl=$1 name=$2; shift 2
+  docker exec "$@" "$RUN-gen" env -u EDGE_HTTP2 -u EDGE_HTTP3 docker-gen "$tmpl" > "$WORK/$name.conf" 2>"$WORK/$name.err" \
+    || fail switch_on_unchanged "docker-gen $tmpl failed: $(cat "$WORK/$name.err")"
+}
+same_render() { # name-a name-b -> fails switch_on_unchanged unless both renders are identical
+  local diff
+  diff=$(diff -u "$WORK/$1.conf" "$WORK/$2.conf") || fail switch_on_unchanged "$2 differs from $1: $(head -40 <<<"$diff")"
+}
+render /tmp/upstream.tmpl upstream
+render /app/nginx.tmpl patched
+render /tmp/upstream.tmpl upstream_debug -e DEBUG_ENDPOINT=true
+render /app/nginx.tmpl patched_debug -e DEBUG_ENDPOINT=true
+grep -q 'server_name app.example.com;' "$WORK/patched.conf" || fail switch_on_unchanged "no app.example.com server rendered"
+grep -q "/nginx-proxy-debug" "$WORK/patched_debug.conf" && grep -q "return 200 '{\"global\":{" "$WORK/patched_debug.conf" \
+  || fail switch_on_unchanged "no debug location with the global config rendered with DEBUG_ENDPOINT=true"
+same_render upstream patched
+same_render upstream_debug patched_debug
+pass switch_on_unchanged
+
+offer_h2() { # host -> "<status> <HTTP version>" of a GET to https://host/ on the edge, from a client that offers h2;
+  # 127.0.0.1 makes a connection without SNI (curl sends none for an IP address), which the catch-all server answers
+  local resolve=()
+  [ "$1" = 127.0.0.1 ] || resolve=(--resolve "$1:$HTTPS_HOST_PORT:127.0.0.1")
+  curl -s -g -k --http2 -o /dev/null -w '%{http_code} %{http_version}' --max-time 10 "${resolve[@]}" \
+    "https://$1:$HTTPS_HOST_PORT/" || true
+}
+# The catch-all server completes the handshake only with a default certificate; without one it refuses it, and the
+# test could not tell whether that server would offer h2.
+OUT=$(volume_run nginx_certs --entrypoint sh "$GEN" -c '
+  set -e; cd /v
+  openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=default" -keyout default.key -out default.crt 2>/dev/null
+  chmod 600 default.key' 2>&1) || fail setup "could not create the default certificate: $OUT"
+OUT=$(compose up -d --force-recreate nginx-proxy-gen 2>&1) || fail setup "cannot recreate gen: $OUT"
+wait_until 30 default_cert_used edge_conf_has 'ssl_certificate /etc/nginx/certs/default.crt'
+catchall_h2() { [ "$(offer_h2 127.0.0.1)" = '503 2' ]; }
+wait_until 30 catchall_h2_on_by_default catchall_h2
+expect_eq catchall_h2_on_by_default "$(offer_h2 127.0.0.1)" '503 2'
+
+# Both switches off. h3.example.com's labels ask for HTTP/2 and HTTP/3, ENABLE_HTTP3=true asks for HTTP/3 on every
+# site, and the catch-all server has "http2 on" by default (it ignores ENABLE_HTTP2): none of them may offer either
+# protocol.
+OLD_PIDS=$(worker_pids) || fail switch_off_reload "cannot list the edge's worker processes"
+OUT=$(EDGE_HTTP2=off EDGE_HTTP3=off ENABLE_HTTP3=true compose up -d --force-recreate nginx-proxy-gen 2>&1) \
+  || fail switch_off_reload "cannot recreate gen: $OUT"
+wait_until 30 switch_off_generated edge_conf_lacks 'http2 on'
+# Workers of the previous configuration still answer until they have finished: wait until none of them is left, so
+# every answer below comes from the new configuration.
+wait_until 30 switch_off_reload workers_replaced
+# ENABLE_HTTP3=true reached gen and asks for HTTP/3 everywhere: without the switch, gen would write it for more server
+# blocks than the label's site and the catch-all server.
+N_H3=$(docker exec "$RUN-gen" env -u EDGE_HTTP3 docker-gen /app/nginx.tmpl 2>/dev/null | grep -c 'http3 on;' || true)
+[ "$N_H3" -gt 2 ] 2>/dev/null || fail switch_off_config "ENABLE_HTTP3=true has no effect in gen ('http3 on;' $N_H3 times)"
+for directive in 'http2 on' 'http3 on' 'quic' 'alt-svc'; do
+  edge_conf_lacks "$directive" || fail switch_off_config "default.conf still has '$directive'"
+done
+pass switch_off_config
+APP_H2=$(offer_h2 app.example.com)
+H3_H2=$(offer_h2 h3.example.com)
+[ "$APP_H2|$H3_H2" = '200 1.1|200 1.1' ] \
+  || fail switch_off_named_site "app.example.com: '$APP_H2', h3.example.com: '$H3_H2', expected '200 1.1' for both"
+https_request h3.example.com /
+[ "$STATUS" = 200 ] || fail switch_off_named_site "h3.example.com: status $STATUS"
+expect_eq switch_off_named_site "$(header Alt-Svc)" ''
+expect_eq switch_off_no_sni "$(offer_h2 127.0.0.1)" '503 1.1'
+H3_STATUS=$(h3_status --max-time 5 https://h3.example.com/)
+[ "$H3_STATUS" != 200 ] && pass switch_off_h3 || fail switch_off_h3 "h3.example.com still answers over HTTP/3"
 
 echo "ALL PASS"

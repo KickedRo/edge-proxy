@@ -1,7 +1,9 @@
 # Compose file for tests/split_smoke.sh: nginx-proxy's "separate containers" layout with the edge and gen images.
 # Not meant to be run by hand: the script sets the variables below, a unique project name per run, and cleans up.
 #   EDGE_IMAGE, GEN_IMAGE, RUN (unique suffix for container names and the nginx container label),
-#   BACKEND_IMAGE, HEADERS_BACKEND_IMAGE, HTTP_PORT / HTTPS_PORT (host ports on 127.0.0.1; empty = Docker picks one).
+#   BACKEND_IMAGE, HEADERS_BACKEND_IMAGE, HTTP_PORT / HTTPS_PORT (host ports on 127.0.0.1; empty = Docker picks one),
+#   EDGE_HTTP2 / EDGE_HTTP3 (gen's hard off switches; unset = empty = the default, on), ENABLE_HTTP3 (nginx-proxy's
+#   HTTP/3 default for every vhost; unset = empty = the template's default, false).
 volumes:
   nginx_conf:
   nginx_vhost:
@@ -54,6 +56,9 @@ services:
       NGINX_CONTAINER_LABEL: "${RUN:?}.nginx"
       DHPARAM_SKIP: "false"
       TRUST_DOWNSTREAM_PROXY: "false" # no trusted proxy in front in this test; also silences the entrypoint's warning
+      EDGE_HTTP2: ${EDGE_HTTP2:-} # the hard off switches: on (the default) until section 5 of the test
+      EDGE_HTTP3: ${EDGE_HTTP3:-}
+      ENABLE_HTTP3: ${ENABLE_HTTP3:-} # set only with the switches off, which must win over it
       # Real deployments: the entrypoint writes the resolvers of gen's own resolv.conf into nginx's "resolver". Under
       # network_mode none that file holds the host's resolvers, not Docker's 127.0.0.11, so set RESOLVERS explicitly
       # to the resolver nginx should use.
@@ -98,7 +103,8 @@ services:
       VIRTUAL_HOST: broken.example.com
 
   # HTTP/3 is switched on for this vhost only, with nginx-proxy's own label (gen's ENABLE_HTTP3 would switch it on for
-  # all vhosts). The test reaches it over UDP from a client container on the proxy network.
+  # all vhosts). The test reaches it over UDP from a client container on the proxy network. Its HTTP/2 label asks for
+  # what ENABLE_HTTP2's default gives anyway; with gen's hard off switches, neither label may win.
   h3:
     image: ${BACKEND_IMAGE:?}
     container_name: ${RUN:?}-h3
@@ -107,3 +113,4 @@ services:
       VIRTUAL_HOST: h3.example.com
     labels:
       com.github.nginx-proxy.nginx-proxy.http3.enable: "true"
+      com.github.nginx-proxy.nginx-proxy.http2.enable: "true"

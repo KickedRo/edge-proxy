@@ -34,8 +34,9 @@ How it differs from the upstream nginx-proxy image:
 - **Verifiable.** Images are signed and come with build provenance, an SBOM and a list of everything inside them,
   see [docs/verify.md](docs/verify.md).
 
-The upstream template is used unchanged. Per-container variables, `vhost.d` snippets, certificates and proxy-wide
-`conf.d` files work as in nginx-proxy's separate-containers layout.
+The upstream template is used as it is, apart from two hard off switches for HTTP/2 and HTTP/3
+([`EDGE_HTTP2`, `EDGE_HTTP3`](docs/configuration.md#the-gen-image)). Per-container variables, `vhost.d` snippets,
+certificates and proxy-wide `conf.d` files work as in nginx-proxy's separate-containers layout.
 
 ## Read this before you install it
 
@@ -55,8 +56,8 @@ The upstream template is used unchanged. Per-container variables, `vhost.d` snip
 > [!CAUTION]
 > **Opinionated, and with no support promise.** KickedRo maintains this for its own use and publishes it in case it
 > helps others. It does one layout (nginx-proxy's separate containers) one way: secure defaults, one setting per
-> protection, upstream's template unchanged. Issues and pull requests are welcome, but they are handled when time
-> allows, and changes that do not fit may be declined. See [CONTRIBUTING.md](CONTRIBUTING.md).
+> protection, upstream's template changed as little as possible. Issues and pull requests are welcome, but they are
+> handled when time allows, and changes that do not fit may be declined. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Install
 
@@ -120,7 +121,9 @@ says so. See [migrating](docs/configuration.md#migrating-from-an-existing-nginx-
 - Detection-only mode, to find false positives on a new site before blocking.
 
 **Hardening**
-- Every protection is one environment variable with a secure default, listed in the [settings table](docs/settings.md).
+- Every protection is one environment variable with a secure default, listed in the [settings table](docs/settings.md)
+  (`gen`'s settings, including the `EDGE_HTTP2` and `EDGE_HTTP3` switches, are in
+  [the configuration guide](docs/configuration.md#the-gen-image)).
 - A start-up check that stops the container on a value it does not understand, and prints a `SECURITY:` line for
   each weakened setting.
 - Client timeouts of 10 s and keep-alive of 15 s, no version in the `Server` header, backend software headers
@@ -186,7 +189,9 @@ image, unchanged. The risk is known and accepted for now.
 
 ## Documentation
 
-- [docs/settings.md](docs/settings.md): every environment variable (generated from `edge/settings.tsv`).
+- [docs/settings.md](docs/settings.md): every environment variable of `edge` (generated from `edge/settings.tsv`).
+  `gen`'s settings, including `EDGE_HTTP2` and `EDGE_HTTP3`, are in
+  [docs/configuration.md](docs/configuration.md#the-gen-image).
 - [docs/configuration.md](docs/configuration.md): mount points, exclusions, what the WAF lets through, logs, block
   page, proxy-wide files, migrating, the `gen` image.
 - [docs/verify.md](docs/verify.md): tags and versions, signatures and provenance, release notes and `manifest.json`,
