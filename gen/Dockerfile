@@ -1,7 +1,9 @@
 # check=skip=InvalidDefaultArgInFrom
 # (GO_VERSION and DOCKER_GEN_VERSION have no default on purpose: the pinned values come from build/versions.env.)
 # gen: docker-gen (built here from its tagged source) plus nginx-proxy's template and entrypoint, a drop-in for
-# nginx-proxy's separate-containers layout.
+# nginx-proxy's separate-containers layout. Two additions of its own: the hard off switches EDGE_HTTP2 and EDGE_HTTP3,
+# patched into the template at build time (patch-template.sh), and an entrypoint in front of nginx-proxy's that
+# checks them (kickedro-entrypoint.sh).
 # Build args come from build/versions.env: GO_VERSION, DOCKER_GEN_VERSION, NGINX_PROXY_REF; SECURITY_EPOCH is the date.
 # Also needs --build-context repo=<repository root> (for LICENSE and NOTICE): docker buildx build --build-context repo=. ... gen/
 ARG GO_VERSION
@@ -21,6 +23,12 @@ RUN git init -q /nginx-proxy && cd /nginx-proxy \
     && git checkout -q FETCH_HEAD \
     && [ "$(git rev-parse HEAD)" = "$NGINX_PROXY_REF" ] \
     || { echo "nginx-proxy checkout does not match NGINX_PROXY_REF=$NGINX_PROXY_REF" >&2; exit 1; }
+
+# The hard off switches: EDGE_HTTP2=off / EDGE_HTTP3=off win over the template's own settings and every backend label,
+# for the catch-all server too. The patch checks that the template still has every line it changes, exactly where
+# expected, so a template that moved them stops the build here instead of shipping without a switch.
+COPY --chmod=755 patch-template.sh /usr/local/bin/
+RUN patch-template.sh /nginx-proxy/nginx.tmpl
 
 # docker-gen at its release tag (tags have no "v").
 RUN set -eux; \
@@ -95,6 +103,7 @@ COPY --from=build /src/LICENSE /usr/local/share/doc/docker-gen/
 # The Go version and every module compiled into the binary (go version -m), for the release manifest.
 COPY --from=build /go-modules.txt /usr/local/share/doc/docker-gen/go-modules.txt
 COPY --from=build /nginx-proxy/app /nginx-proxy/nginx.tmpl /nginx-proxy/LICENSE /app/
+COPY --chmod=755 kickedro-entrypoint.sh /app/
 # Licence texts of what the image contains (docker-gen, nginx-proxy) plus this repository's own LICENSE and NOTICE
 # (named build context "repo" = the repository root: build with --build-context repo=. as the CI workflow does).
 COPY --from=build /src/LICENSE /usr/share/licenses/docker-gen/LICENSE
@@ -102,8 +111,9 @@ COPY --from=build /nginx-proxy/LICENSE /usr/share/licenses/nginx-proxy/LICENSE
 COPY --chmod=644 --from=repo LICENSE NOTICE /usr/share/licenses/edge-proxy/
 WORKDIR /app/
 
-ENTRYPOINT ["/app/docker-entrypoint.sh"]
-# Same arguments as nginx-proxy's Dockerfile.dockergen at NGINX_PROXY_REF. docker-entrypoint.sh replaces
-# $NGINX_CONTAINER_LABEL below with the variable's value; the nginx container is found by that label.
+ENTRYPOINT ["/app/kickedro-entrypoint.sh"]
+# Same arguments as nginx-proxy's Dockerfile.dockergen at NGINX_PROXY_REF. kickedro-entrypoint.sh checks EDGE_HTTP2 and
+# EDGE_HTTP3, then passes the arguments on to nginx-proxy's docker-entrypoint.sh, which replaces $NGINX_CONTAINER_LABEL
+# below with the variable's value; the nginx container is found by that label.
 CMD ["docker-gen", "-watch", "-wait", "100ms:500ms", "-event-filter", "event=connect", "-event-filter", "event=disconnect", \
      "-notify-filter", "label=$NGINX_CONTAINER_LABEL", "/app/nginx.tmpl", "/etc/nginx/conf.d/default.conf"]
