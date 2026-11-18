@@ -34,8 +34,9 @@ How it differs from the upstream nginx-proxy image:
 - **Verifiable.** Images are signed and come with build provenance, an SBOM and a list of everything inside them,
   see [docs/verify.md](docs/verify.md).
 
-The upstream template is used unchanged. Per-container variables, `vhost.d` snippets, certificates and proxy-wide
-`conf.d` files work as in nginx-proxy's separate-containers layout.
+The upstream template is used as it is, apart from two hard off switches for HTTP/2 and HTTP/3
+([`EDGE_HTTP2`, `EDGE_HTTP3`](docs/configuration.md#the-gen-image)). Per-container variables, `vhost.d` snippets,
+certificates and proxy-wide `conf.d` files work as in nginx-proxy's separate-containers layout.
 
 ## Read this before you install it
 
@@ -55,8 +56,8 @@ The upstream template is used unchanged. Per-container variables, `vhost.d` snip
 > [!CAUTION]
 > **Opinionated, and with no support promise.** KickedRo maintains this for its own use and publishes it in case it
 > helps others. It does one layout (nginx-proxy's separate containers) one way: secure defaults, one setting per
-> protection, upstream's template unchanged. Issues and pull requests are welcome, but they are handled when time
-> allows, and changes that do not fit may be declined. See [CONTRIBUTING.md](CONTRIBUTING.md).
+> protection, upstream's template changed as little as possible. Issues and pull requests are welcome, but they are
+> handled when time allows, and changes that do not fit may be declined. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Install
 

@@ -15,6 +15,13 @@ changed, on the [Releases page](https://github.com/KickedRo/edge-proxy/releases)
 
 ### Added
 
+- **Hard off switches for HTTP/2 and HTTP/3.** `EDGE_HTTP2=off` and `EDGE_HTTP3=off` on the `gen` container turn the
+  protocol off in every server block `gen` writes, the catch-all server's included (unknown host names, connections
+  without SNI), whatever backend labels and `ENABLE_HTTP2` / `ENABLE_HTTP3` say: those are only defaults, and the
+  catch-all server has HTTP/2 on even with `ENABLE_HTTP2=false`. For a protocol-level vulnerability, or a site
+  policy. `on`, the default, changes nothing; any other value stops `gen` at start. `gen`'s entrypoint is now
+  `/app/kickedro-entrypoint.sh`, which checks the two settings and then runs nginx-proxy's entrypoint; the command is
+  unchanged ([configuration guide](docs/configuration.md#the-gen-image)).
 - HTTP/3 in the split-layout smoke test (`tests/split_smoke.sh`): a site with the HTTP/3 label answers over HTTP/3,
   sends `alt-svc` over HTTP/2, and attacks in the URL, a header, a form body and a body streamed without
   `Content-Length` are blocked by the CRS over HTTP/3; rule 920280 still applies to other protocols. Documented in the

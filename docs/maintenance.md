@@ -227,9 +227,14 @@ the pin" issue opens, or when an nginx-proxy release has a fix you want:
    Look at `nginx.tmpl`, `app/` and `Dockerfile.dockergen` (what `gen` uses), `Dockerfile.debian` and
    `network_internal.conf` (what `edge` copies). Pick the commit to move to: the newest commit of `main` you reviewed,
    or a release's commit.
-2. Carry over what the images copy by hand, if it changed: the `ENV`, `ENTRYPOINT` and `CMD` of `Dockerfile.dockergen`
-   into `gen/Dockerfile` (and `UPSTREAM_CMD` in `tests/split_smoke.sh`, which checks it), and the `nginx.conf` edits of
-   `Dockerfile.debian` into `edge/Dockerfile`.
+2. Carry over what the images copy by hand, if it changed: the `ENV` and `CMD` of `Dockerfile.dockergen` into
+   `gen/Dockerfile` (and `EXPECTED_CMD` in `tests/split_smoke.sh`, which checks gen's entrypoint and command), and the
+   `nginx.conf` edits of `Dockerfile.debian` into `edge/Dockerfile`. gen's entrypoint is its own,
+   `/app/kickedro-entrypoint.sh`, which checks `EDGE_HTTP2` and `EDGE_HTTP3` and then runs upstream's: if upstream's
+   `ENTRYPOINT` changed, change the `exec` line at the end of `gen/kickedro-entrypoint.sh`. `gen/patch-template.sh`
+   makes three changes to the template for these switches and checks each: if the new template changed or moved a
+   line the patch relies on, the `gen` build stops there with a `patch-template:` message. Port the three changes to
+   the new template in that script, then run `tests/split_smoke.sh` again (its section 5 tests the switches).
 3. Set `NGINX_PROXY_REF` in `pins.env` to the full 40-character SHA, in a pull request. CI builds both images from it
    and runs the split-layout smoke test, which also checks that `gen` carries the pinned commit. If the template
    changes what users see, add a changelog entry (and bump `VERSION` for a changed default).

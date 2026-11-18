@@ -163,3 +163,29 @@ The three template changes (exact text; the old lines are the template's at the 
   git add docs/configuration.md CHANGELOG.md README.md
   git commit -m "docs: EDGE_HTTP2 and EDGE_HTTP3"
   ```
+
+## As built
+
+Where the build departed from this plan, and why:
+
+- **Task 1: the switches are kept in `$globals`, not in `$config`.** The template's debug endpoint
+  (`DEBUG_ENDPOINT=true`) prints `$globals.config` as JSON, so keys added to `$config` changed its output with the
+  switches on. The two keys are `$globals.edge_http2` and `$globals.edge_http3`, set right after the template's
+  `{{- $_ := set $globals "config" $config }}` (instead of after the `enable_http3` line); the per-site decisions and
+  the catch-all server's wrap use them (`and $globals.edge_http2 (...)`, `{{- if $globals.edge_http2 }}`).
+- **Task 1: the expression fails closed.** `(eq ($globals.Env.EDGE_HTTP2 | default "on") "on")`, not
+  `(ne ... "off")`: a value that never passed the entrypoint's check (`docker exec ... docker-gen`) leaves the protocol
+  off, not on.
+- **Task 1: the checks count trimmed lines.** Every line the patch relies on, the `http2 on;` lines included, is
+  counted on its text without leading and trailing spaces, so a copy with other indentation counts too; the lines it
+  changes must still match exactly.
+- **Task 1: the patch runs last in the build stage**, after the docker-gen build, not right after the checkout, so a
+  change to the patch does not rebuild docker-gen.
+- **Task 1: a test the plan did not have, `switch_on_unchanged`.** It downloads `nginx.tmpl` at the pinned commit from
+  `raw.githubusercontent.com` and requires that gen's template, with both switches unset
+  (`env -u EDGE_HTTP2 -u EDGE_HTTP3`), renders exactly what upstream's renders for the same containers, once as is and
+  once with `DEBUG_ENDPOINT=true`. `settings_refused` requires the two `ERROR:` lines to be the whole output, so
+  nginx-proxy's entrypoint never ran. Section 0's variable is `EXPECTED_CMD` (it was `UPSTREAM_CMD`): the entrypoint
+  is no longer upstream's.
+- **Task 2: more files.** `docs/maintenance.md` (moving the nginx-proxy pin), `CONTRIBUTING.md` (the template is now
+  patched; the test's download) and two sentences of `README.md` that said the template is unchanged.
