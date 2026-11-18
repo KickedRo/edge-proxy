@@ -2,7 +2,8 @@
 # Not meant to be run by hand: the script sets the variables below, a unique project name per run, and cleans up.
 #   EDGE_IMAGE, GEN_IMAGE, RUN (unique suffix for container names and the nginx container label),
 #   BACKEND_IMAGE, HEADERS_BACKEND_IMAGE, HTTP_PORT / HTTPS_PORT (host ports on 127.0.0.1; empty = Docker picks one),
-#   EDGE_HTTP2 / EDGE_HTTP3 (gen's hard off switches; unset = empty = the default, on).
+#   EDGE_HTTP2 / EDGE_HTTP3 (gen's hard off switches; unset = empty = the default, on), ENABLE_HTTP3 (nginx-proxy's
+#   HTTP/3 default for every vhost; unset = empty = the template's default, false).
 volumes:
   nginx_conf:
   nginx_vhost:
@@ -57,6 +58,7 @@ services:
       TRUST_DOWNSTREAM_PROXY: "false" # no trusted proxy in front in this test; also silences the entrypoint's warning
       EDGE_HTTP2: ${EDGE_HTTP2:-} # the hard off switches: on (the default) until section 5 of the test
       EDGE_HTTP3: ${EDGE_HTTP3:-}
+      ENABLE_HTTP3: ${ENABLE_HTTP3:-} # set only with the switches off, which must win over it
       # Real deployments: the entrypoint writes the resolvers of gen's own resolv.conf into nginx's "resolver". Under
       # network_mode none that file holds the host's resolvers, not Docker's 127.0.0.11, so set RESOLVERS explicitly
       # to the resolver nginx should use.

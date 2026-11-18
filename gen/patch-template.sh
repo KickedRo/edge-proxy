@@ -14,11 +14,13 @@
 #  3. the catch-all server's "http2 on;" is wrapped in the HTTP/2 switch.
 # With both switches on, the template renders exactly what the unpatched one does, debug endpoint included
 # (tests/split_smoke.sh compares them).
-# Every line the patch relies on must be found exactly once (counted on the text without its indentation, so a copy
-# indented differently counts too; the lines changed must also match exactly), the three "http2 on;" lines exactly
-# where expected, and every replaced line must be gone afterwards. Otherwise the patch prints "patch-template: <what>",
-# exits 1 and leaves the file as it was: a template update that moves these lines stops the build instead of silently
-# dropping a switch.
+# Every line the patch relies on must be found exactly once (counted on the text without leading and trailing spacing,
+# so a copy spaced differently counts too; the lines changed must also match exactly), the three "http2 on;" lines
+# exactly where expected, and every replaced line must be gone afterwards. The HTTP/3 lines the switch relies on must
+# still be the template's known ones, and no listen line may switch HTTP/2 on by itself. Otherwise the patch prints
+# "patch-template: <what>", exits 1 and leaves the file as it was: a template update that moves these lines, or adds
+# another way to turn HTTP/2 or HTTP/3 on, stops the build for a person to port the switch, instead of silently
+# shipping without it.
 # The quotes and $ in the lines below are template text, not shell.
 # shellcheck disable=SC2016,SC2089,SC2090
 set -eu
@@ -92,8 +94,12 @@ END {
     }
 }' "$tmpl" > "$tmp" || exit 1
 
-# The result, checked on its own (lines compared without their indentation): every new line is there once, no replaced
-# line is left, and every "http2 on;" comes right after the condition that guards it.
+# The result, checked on its own (lines compared without leading and trailing spacing): every new line is there once, no
+# replaced line is left, and every "http2 on;" comes right after the condition that guards it. HTTP/3 is switched off
+# through the per-site decision alone, so the lines it governs must be exactly the template's known ones: two
+# "http3 on;", four quic listen lines and one alt-svc header (all under $vhost.http3_enabled, or the catch-all
+# server's $http3_enabled, which is made from them). And no listen line may carry the old "http2" parameter, which
+# would turn HTTP/2 on whatever the switch says.
 problems=$(awk '
     function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
     BEGIN { split("P_ANCHOR P_ADD2 P_ADD3 P_NEW2 P_NEW3 P_WRAP_IF P_OLD2 P_OLD3", names, " ") }
@@ -105,6 +111,10 @@ problems=$(awk '
             if (trim(prev) != ENVIRON["P_SITE_IF"] && trim(prev) != trim(ENVIRON["P_WRAP_IF"]))
                 printf "; \"http2 on;\" on line %d is not guarded", NR
         }
+        if (t ~ /^http3[ \t]+on[ \t]*;/) n_http3++
+        if (t ~ /^listen[ \t]/ && t ~ /[ \t]quic([ \t;]|$)/) n_quic++
+        if (tolower(t) ~ /^add_header[ \t]+alt-svc[ \t]/) n_altsvc++
+        if (t ~ /^listen[ \t]/ && t ~ /[ \t]http2([ \t;]|$)/) printf "; listen with \"http2\" on line %d", NR
         prev = $0
     }
     END {
@@ -113,6 +123,9 @@ problems=$(awk '
             if (seen[names[k]] + 0 != want) printf "; %s occurs %d times, expected %d", names[k], seen[names[k]], want
         }
         if (n_http2 != 3) printf "; \"http2 on;\" occurs %d times, expected 3", n_http2
+        if (n_http3 != 2) printf "; \"http3 on;\" occurs %d times, expected 2", n_http3
+        if (n_quic != 4) printf "; %d quic listen lines, expected 4", n_quic
+        if (n_altsvc != 1) printf "; %d alt-svc add_header lines, expected 1", n_altsvc
     }' "$tmp")
 [ -z "$problems" ] || die "after patching:${problems#;}"
 

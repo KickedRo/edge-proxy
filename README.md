@@ -121,7 +121,9 @@ says so. See [migrating](docs/configuration.md#migrating-from-an-existing-nginx-
 - Detection-only mode, to find false positives on a new site before blocking.
 
 **Hardening**
-- Every protection is one environment variable with a secure default, listed in the [settings table](docs/settings.md).
+- Every protection is one environment variable with a secure default, listed in the [settings table](docs/settings.md)
+  (`gen`'s settings, including the `EDGE_HTTP2` and `EDGE_HTTP3` switches, are in
+  [the configuration guide](docs/configuration.md#the-gen-image)).
 - A start-up check that stops the container on a value it does not understand, and prints a `SECURITY:` line for
   each weakened setting.
 - Client timeouts of 10 s and keep-alive of 15 s, no version in the `Server` header, backend software headers
@@ -187,7 +189,9 @@ image, unchanged. The risk is known and accepted for now.
 
 ## Documentation
 
-- [docs/settings.md](docs/settings.md): every environment variable (generated from `edge/settings.tsv`).
+- [docs/settings.md](docs/settings.md): every environment variable of `edge` (generated from `edge/settings.tsv`).
+  `gen`'s settings, including `EDGE_HTTP2` and `EDGE_HTTP3`, are in
+  [docs/configuration.md](docs/configuration.md#the-gen-image).
 - [docs/configuration.md](docs/configuration.md): mount points, exclusions, what the WAF lets through, logs, block
   page, proxy-wide files, migrating, the `gen` image.
 - [docs/verify.md](docs/verify.md): tags and versions, signatures and provenance, release notes and `manifest.json`,

@@ -25,8 +25,9 @@ command -v curl >/dev/null || { echo "FAIL setup: curl is required on the host" 
 RUN="splittest-$$-$RANDOM"
 WORK=$(mktemp -d)
 export RUN BACKEND_IMAGE HEADERS_BACKEND_IMAGE EDGE_IMAGE=$EDGE GEN_IMAGE=$GEN HTTP_PORT=${PORT_1:-} HTTPS_PORT=${PORT_2:-}
-# gen's switches stay at their default (on) until section 5 sets them, whatever the calling shell has.
-unset EDGE_HTTP2 EDGE_HTTP3
+# gen's switches stay at their default (on), and ENABLE_HTTP3 at the template's, until section 5 sets them, whatever
+# the calling shell has.
+unset EDGE_HTTP2 EDGE_HTTP3 ENABLE_HTTP3
 compose() { docker compose -p "$RUN" --profile '*' -f "$HERE/compose.smoke.yml" "$@"; }
 notice_restarts() { # container -> a NOTICE line when edge's restart policy restarted it (compose.smoke.yml says why), so
   # a crash the policy hid still shows in the CI log, with nginx's errors from before its last start
@@ -358,7 +359,8 @@ pass settings_refused
 # With both switches unset, gen's template renders exactly what nginx-proxy's template at the pinned commit renders, for
 # the same containers (docker-gen without a destination writes to stdout). Also with the debug endpoint on: its JSON
 # holds the template's whole config map, so anything the patch kept there would show.
-curl -fsS --max-time 30 -o "$WORK/upstream.tmpl" "https://raw.githubusercontent.com/nginx-proxy/nginx-proxy/$PINNED_REF/nginx.tmpl" \
+curl -fsS --retry 3 --retry-all-errors --max-time 30 -o "$WORK/upstream.tmpl" \
+  "https://raw.githubusercontent.com/nginx-proxy/nginx-proxy/$PINNED_REF/nginx.tmpl" \
   2>"$WORK/curl.err" || fail switch_on_unchanged "cannot download nginx.tmpl at $PINNED_REF: $(cat "$WORK/curl.err")"
 OUT=$(docker cp "$WORK/upstream.tmpl" "$RUN-gen:/tmp/upstream.tmpl" 2>&1) || fail switch_on_unchanged "cannot copy it into gen: $OUT"
 render() { # template-in-gen name [docker-exec-args...] -> $WORK/name.conf, what docker-gen renders from that template
@@ -401,15 +403,20 @@ catchall_h2() { [ "$(offer_h2 127.0.0.1)" = '503 2' ]; }
 wait_until 30 catchall_h2_on_by_default catchall_h2
 expect_eq catchall_h2_on_by_default "$(offer_h2 127.0.0.1)" '503 2'
 
-# Both switches off. h3.example.com's labels ask for HTTP/2 and HTTP/3, and the catch-all server has "http2 on" by
-# default (it ignores ENABLE_HTTP2): none of them may offer either protocol.
+# Both switches off. h3.example.com's labels ask for HTTP/2 and HTTP/3, ENABLE_HTTP3=true asks for HTTP/3 on every
+# site, and the catch-all server has "http2 on" by default (it ignores ENABLE_HTTP2): none of them may offer either
+# protocol.
 OLD_PIDS=$(worker_pids) || fail switch_off_reload "cannot list the edge's worker processes"
-OUT=$(EDGE_HTTP2=off EDGE_HTTP3=off compose up -d --force-recreate nginx-proxy-gen 2>&1) \
+OUT=$(EDGE_HTTP2=off EDGE_HTTP3=off ENABLE_HTTP3=true compose up -d --force-recreate nginx-proxy-gen 2>&1) \
   || fail switch_off_reload "cannot recreate gen: $OUT"
 wait_until 30 switch_off_generated edge_conf_lacks 'http2 on'
 # Workers of the previous configuration still answer until they have finished: wait until none of them is left, so
 # every answer below comes from the new configuration.
 wait_until 30 switch_off_reload workers_replaced
+# ENABLE_HTTP3=true reached gen and asks for HTTP/3 everywhere: without the switch, gen would write it for more server
+# blocks than the label's site and the catch-all server.
+N_H3=$(docker exec "$RUN-gen" env -u EDGE_HTTP3 docker-gen /app/nginx.tmpl 2>/dev/null | grep -c 'http3 on;' || true)
+[ "$N_H3" -gt 2 ] 2>/dev/null || fail switch_off_config "ENABLE_HTTP3=true has no effect in gen ('http3 on;' $N_H3 times)"
 for directive in 'http2 on' 'http3 on' 'quic' 'alt-svc'; do
   edge_conf_lacks "$directive" || fail switch_off_config "default.conf still has '$directive'"
 done

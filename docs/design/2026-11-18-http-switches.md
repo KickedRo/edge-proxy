@@ -1,6 +1,6 @@
 # Hard off switches for HTTP/2 and HTTP/3 (short design)
 
-Status: proposed 2026-11-18, for the owner's approval. Ships in 0.1.2, together with the nginx security release that
+Status: approved 2026-11-18. Ships in the patch release after 0.1.1, together with the nginx security release that
 the pipeline picks up by itself.
 
 ## Intent

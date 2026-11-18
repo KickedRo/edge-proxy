@@ -350,23 +350,31 @@ runs. Use it like nginx-proxy's `dockergen` image. Settings of the template (`HT
   read-only in `edge`).
 - **`TRUST_DOWNSTREAM_PROXY`**: nginx-proxy's default is `true` (trust `X-Forwarded-*` from a proxy in front). If
   nothing is in front, set it to `false` explicitly: it also silences a start-up warning.
-- **`EDGE_HTTP2`** and **`EDGE_HTTP3`**: hard off switches, `on` (the default; empty counts as unset) or `off`. Use
-  them while a vulnerability in nginx's HTTP/2 or HTTP/3 code is open, or to keep a protocol off by policy.
-  nginx-proxy's own `ENABLE_HTTP2` and `ENABLE_HTTP3` cannot do that: they are only defaults, a backend's
-  `com.github.nginx-proxy.nginx-proxy.http2.enable` or `...http3.enable` label turns the protocol on again for its
-  site, and the catch-all server, which answers unknown host names and connections without SNI, has HTTP/2 on even
-  with `ENABLE_HTTP2=false`.
+- **`EDGE_HTTP2`** and **`EDGE_HTTP3`**: hard off switches, `on` (the default; empty counts as unset) or `off`. They
+  go on the **`gen`** container, unlike `edge`'s other `EDGE_*` settings: set on `edge`, or on a `gen` image of 0.1.1
+  or older, they do nothing. Use them while a vulnerability in nginx's HTTP/2 or HTTP/3 code is open, or to keep a
+  protocol off by policy. nginx-proxy's own `ENABLE_HTTP2` and `ENABLE_HTTP3` cannot do that: they are only defaults,
+  a backend's `com.github.nginx-proxy.nginx-proxy.http2.enable` or `...http3.enable` label turns the protocol on again
+  for its site, and the catch-all server, which answers unknown host names and connections without SNI, has HTTP/2 on
+  even with `ENABLE_HTTP2=false`.
   - `EDGE_HTTP2=off`: no server block that `gen` writes has `http2 on`, the catch-all server included, whatever the
     labels and `ENABLE_HTTP2` say.
   - `EDGE_HTTP3=off`: no server block has `http3 on`, a `quic` listener or an `alt-svc` header (which tells clients
     to try HTTP/3), the catch-all server included, whatever the labels and `ENABLE_HTTP3` say.
   - `on` changes nothing: `gen` writes exactly what nginx-proxy's template writes.
-  - Any other value (`Off`, a typo, a stray space) stops `gen` at start with
-    `ERROR: EDGE_HTTP2='Off' is not allowed. Allowed: on off.`, and `edge` keeps the configuration it already has.
+  - Any other value (`Off`, `false` by analogy with `ENABLE_HTTP2`, a typo, a stray space) stops `gen` at start with
+    `ERROR: EDGE_HTTP2='false' is not allowed. Allowed: on off.` `edge` then keeps the configuration it already has,
+    and with it the protocols. With `restart: unless-stopped`, `gen` restarts in a loop while `docker compose up -d`
+    still reports it as started, so check after every change (below).
   - A new value applies when `gen` is recreated (`docker compose up -d` does that when the value changed): it writes
     the configuration again and reloads `edge`. Connections already open keep their protocol until they close.
-  - The switches cover only what `gen` writes: an `http2 on` in a file of your own (`conf.d`, `vhost.d`) still
-    applies.
+  - To check that it took effect, with both switches off:
+    `docker exec <edge container> nginx -T 2>/dev/null | grep -wE 'http2 on|http3 on|quic|alt-svc'` prints nothing
+    (with one switch off, look for its own directives), and `docker compose ps` shows `gen` running, not restarting.
+    (`-w` matches whole words only: `edge`'s `mime.types` has `video/quicktime`.)
+  - The switches remove these directives from what `gen` writes; they do not write `http2 off`. So an `http2 on` at
+    http level in a `conf.d` file of your own turns HTTP/2 back on for every site `gen` writes, and `http3 on`, `quic`
+    listeners or `alt-svc` headers in your own `conf.d` or `vhost.d` files still apply.
 - **The Docker socket** is expected at `/tmp/docker.sock` inside `gen` (`DOCKER_HOST=unix:///tmp/docker.sock`).
   Mount your host's socket there, read-only: `/var/run/docker.sock` for rootful Docker; rootless Docker and Docker
   Desktop use another path (for example `$XDG_RUNTIME_DIR/docker.sock`). Only `gen` and acme-companion get the
