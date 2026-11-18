@@ -355,20 +355,32 @@ for setting in EDGE_HTTP2=Off EDGE_HTTP3=maybe; do
 done
 pass settings_refused
 
-# With both switches at their default, gen's template renders exactly what nginx-proxy's template at the pinned commit
-# renders, for the same containers (docker-gen without a destination writes to stdout).
+# With both switches unset, gen's template renders exactly what nginx-proxy's template at the pinned commit renders, for
+# the same containers (docker-gen without a destination writes to stdout). Also with the debug endpoint on: its JSON
+# holds the template's whole config map, so anything the patch kept there would show.
 curl -fsS --max-time 30 -o "$WORK/upstream.tmpl" "https://raw.githubusercontent.com/nginx-proxy/nginx-proxy/$PINNED_REF/nginx.tmpl" \
   2>"$WORK/curl.err" || fail switch_on_unchanged "cannot download nginx.tmpl at $PINNED_REF: $(cat "$WORK/curl.err")"
 OUT=$(docker cp "$WORK/upstream.tmpl" "$RUN-gen:/tmp/upstream.tmpl" 2>&1) || fail switch_on_unchanged "cannot copy it into gen: $OUT"
-render() { # template-in-gen name -> $WORK/name.conf, the configuration docker-gen renders from it
-  docker exec "$RUN-gen" docker-gen "$1" > "$WORK/$2.conf" 2>"$WORK/$2.err" \
-    || fail switch_on_unchanged "docker-gen $1 failed: $(cat "$WORK/$2.err")"
+render() { # template-in-gen name [docker-exec-args...] -> $WORK/name.conf, what docker-gen renders from that template
+  # with the switches unset
+  local tmpl=$1 name=$2; shift 2
+  docker exec "$@" "$RUN-gen" env -u EDGE_HTTP2 -u EDGE_HTTP3 docker-gen "$tmpl" > "$WORK/$name.conf" 2>"$WORK/$name.err" \
+    || fail switch_on_unchanged "docker-gen $tmpl failed: $(cat "$WORK/$name.err")"
 }
-render /app/nginx.tmpl patched
+same_render() { # name-a name-b -> fails switch_on_unchanged unless both renders are identical
+  local diff
+  diff=$(diff -u "$WORK/$1.conf" "$WORK/$2.conf") || fail switch_on_unchanged "$2 differs from $1: $(head -40 <<<"$diff")"
+}
 render /tmp/upstream.tmpl upstream
+render /app/nginx.tmpl patched
+render /tmp/upstream.tmpl upstream_debug -e DEBUG_ENDPOINT=true
+render /app/nginx.tmpl patched_debug -e DEBUG_ENDPOINT=true
 grep -q 'server_name app.example.com;' "$WORK/patched.conf" || fail switch_on_unchanged "no app.example.com server rendered"
-DIFF=$(diff -u "$WORK/upstream.conf" "$WORK/patched.conf") && pass switch_on_unchanged \
-  || fail switch_on_unchanged "the output differs: $(head -40 <<<"$DIFF")"
+grep -q "/nginx-proxy-debug" "$WORK/patched_debug.conf" && grep -q "return 200 '{\"global\":{" "$WORK/patched_debug.conf" \
+  || fail switch_on_unchanged "no debug location with the global config rendered with DEBUG_ENDPOINT=true"
+same_render upstream patched
+same_render upstream_debug patched_debug
+pass switch_on_unchanged
 
 offer_h2() { # host -> "<status> <HTTP version>" of a GET to https://host/ on the edge, from a client that offers h2;
   # 127.0.0.1 makes a connection without SNI (curl sends none for an IP address), which the catch-all server answers

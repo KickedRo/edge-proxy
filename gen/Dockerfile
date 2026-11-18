@@ -24,12 +24,6 @@ RUN git init -q /nginx-proxy && cd /nginx-proxy \
     && [ "$(git rev-parse HEAD)" = "$NGINX_PROXY_REF" ] \
     || { echo "nginx-proxy checkout does not match NGINX_PROXY_REF=$NGINX_PROXY_REF" >&2; exit 1; }
 
-# The hard off switches: EDGE_HTTP2=off / EDGE_HTTP3=off win over the template's own settings and every backend label,
-# for the catch-all server too. The patch checks that the template still has every line it changes, exactly where
-# expected, so a template that moved them stops the build here instead of shipping without a switch.
-COPY --chmod=755 patch-template.sh /usr/local/bin/
-RUN patch-template.sh /nginx-proxy/nginx.tmpl
-
 # docker-gen at its release tag (tags have no "v").
 RUN set -eux; \
     git clone -q --depth 1 --branch "$DOCKER_GEN_VERSION" https://github.com/nginx-proxy/docker-gen.git /src; \
@@ -70,6 +64,13 @@ RUN set -eux; \
     echo "--- docker-gen build info"; \
     go version -m /docker-gen > /go-modules.txt; \
     cat /go-modules.txt
+
+# The hard off switches: EDGE_HTTP2=off / EDGE_HTTP3=off win over the template's own settings and every backend label,
+# for the catch-all server too. The patch checks that the template still has every line it changes, exactly where
+# expected, so a template that moved them stops the build here instead of shipping without a switch. Last in this
+# stage, so a change to the patch does not rebuild docker-gen.
+COPY --chmod=755 patch-template.sh /usr/local/bin/
+RUN patch-template.sh /nginx-proxy/nginx.tmpl
 
 # ---- final image: same layout as nginx-proxy's Dockerfile.dockergen (Debian flavour) --------------------------
 # What upstream's docker-gen Debian image provides: debian slim, openssl, the binary in /usr/local/bin, the license.
